@@ -1,0 +1,26 @@
+{
+  "name": "VeloMałopolska (Expo)",
+  "tagline": "Natywna apka tras rowerowych — React Native + Expo, test na iPhone przez Expo Go.",
+  "category": "mobile",
+  "status": "active",
+  "type": "mobile",
+  "tags": [
+    "expo",
+    "react-native",
+    "mapy",
+    "rower"
+  ],
+  "tech": [
+    "expo",
+    "react-native"
+  ],
+  "launch": {
+    "dev": "npx expo start --tunnel"
+  },
+  "icon": "bike",
+  "accent": "#2E7D32",
+  "pinned": true,
+  "supersedes": "velo-malopolska",
+  "notes": "Mobilna kontynuacja prototypu velo-malopolska. Docelowo MapKit + Liquid Glass.",
+  "description": "Natywna (React Native + Expo) wersja wyszukiwarki tras rowerowych Małopolski. Przeglądasz trasy na mapie, wchodzisz w szczegóły, prowadzisz nawigację „ride\" i dorzucasz POI po drodze, a na końcu dostajesz podsumowanie przejazdu. Testowana na iPhonie przez Expo Go; docelowo natywny iOS (MapKit + Liquid Glass)."
+}

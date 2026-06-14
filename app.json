@@ -1,0 +1,37 @@
+{
+  "expo": {
+    "name": "VeloMałopolska",
+    "slug": "velo-expo",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "VeloMałopolska używa Twojej lokalizacji, by śledzić trasę i powiadamiać o ciekawych miejscach po drodze."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0b0f14",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "permissions": ["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"],
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "VeloMałopolska używa Twojej lokalizacji, by śledzić trasę i powiadamiać o ciekawych miejscach po drodze."
+        }
+      ]
+    ]
+  }
+}
