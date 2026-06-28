@@ -182,8 +182,9 @@ export const MAP_HTML = `<!DOCTYPE html>
   };
 
   /* ---- tryb planowania trasy ---- */
-  var planMarkers=[], planLine=null, planActive=false, planPoiMarkers=[], nearbyMarkers=[], poiHighlight=null, planPaintLayers=[];
+  var planMarkers=[], planLine=null, planActive=false, planPoiMarkers=[], nearbyMarkers=[], poiHighlight=null, planPaintLayers=[], suggestMarkers=[];
   function clearPlanPaint(){ planPaintLayers.forEach(function(l){map.removeLayer(l);}); planPaintLayers=[]; }
+  function clearSuggest(){ suggestMarkers.forEach(function(l){map.removeLayer(l);}); suggestMarkers=[]; }
   function onMapClick(e){ send({type:'mapclick', lat:+e.latlng.lat.toFixed(6), lon:+e.latlng.lng.toFixed(6)}); }
   window.setPlanning=function(on){
     planActive=on;
@@ -236,6 +237,15 @@ export const MAP_HTML = `<!DOCTYPE html>
     planPoiMarkers.forEach(function(m){map.removeLayer(m);}); planPoiMarkers=[];
     pts.forEach(function(p){ planPoiMarkers.push(L.marker([p.lat,p.lon],{icon:poiIcon(p.kind)}).addTo(map)); });
   };
+  // pasywne markery sugerowanych POI (po wyborze „co zobaczyć") — klik = otwórz szczegóły
+  window.setSuggestPois=function(json){
+    var pts=JSON.parse(json); clearSuggest();
+    pts.forEach(function(p,i){
+      var m=L.marker([p.lat,p.lon],{icon:poiIcon(p.kind),opacity:0.92}).addTo(map);
+      m.on('click',(function(idx){return function(){send({type:'suggesttap',idx:idx});};})(i));
+      suggestMarkers.push(m);
+    });
+  };
   window.setNearbyMarkers=function(json){
     var pts=JSON.parse(json);
     nearbyMarkers.forEach(function(m){map.removeLayer(m);}); nearbyMarkers=[];
@@ -256,7 +266,7 @@ export const MAP_HTML = `<!DOCTYPE html>
     planMarkers.forEach(function(m){map.removeLayer(m);}); planMarkers=[];
     planPoiMarkers.forEach(function(m){map.removeLayer(m);}); planPoiMarkers=[];
     nearbyMarkers.forEach(function(m){map.removeLayer(m);}); nearbyMarkers=[];
-    clearPlanPaint();
+    clearPlanPaint(); clearSuggest();
     if(planLine){ map.removeLayer(planLine); planLine=null; }
   };
   window.fitPlan=function(){

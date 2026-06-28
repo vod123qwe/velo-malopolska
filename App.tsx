@@ -281,12 +281,29 @@ async function fetchT(url: string, opts: any, ms: number): Promise<Response> {
   try { return await fetch(url, { ...(opts || {}), signal: ctrl.signal }); } finally { clearTimeout(t); }
 }
 // Routing przez wiele punktów (BRouter) — pełne dane w stylu Komoot
-async function routeThrough(pts: number[][], profileKey: string): Promise<any> {
+async function routeThrough(pts: number[][], profileKey: string, altIdx: number = 0): Promise<any> {
   if (pts.length < 2) return null;
   const profile = planProfile(profileKey);
   const lonlats = pts.map((p) => `${p[1]},${p[0]}`).join('|');
-  const url = `https://brouter.de/brouter?lonlats=${lonlats}&profile=${profile}&alternativeidx=0&format=geojson`;
+  const url = `https://brouter.de/brouter?lonlats=${lonlats}&profile=${profile}&alternativeidx=${altIdx}&format=geojson`;
   try { return parseBRouter(await (await fetchT(url, {}, 15000)).json()); } catch { return null; }
+}
+// ranking alternatyw wg miękkiego „unikać" (0..100): niżej = lepiej dopasowane
+function altScore(route: any, avoid: any): number {
+  const w = avoid || {};
+  const cp = carPct(route) / 100;
+  const steep = Math.min(1, (route.ascent || 0) / (((route.distM || 1) / 1000) * 18));
+  return ((w.cars || 0) / 100) * cp + ((w.steep || 0) / 100) * steep;
+}
+function sortByAvoid(alts: any[], avoid: any): any[] { return [...alts].sort((a, b) => altScore(a.route, avoid) - altScore(b.route, avoid)); }
+// odsiej niemal identyczne trasy (ten sam dystans ±2% i podobne przewyższenie) — różne profile bywają zbieżne
+function dedupAlts(alts: any[]): any[] {
+  const out: any[] = [];
+  for (const a of alts) {
+    const dup = out.find((o) => Math.abs(o.route.distM - a.route.distM) / Math.max(1, a.route.distM) < 0.02 && Math.abs((o.route.ascent || 0) - (a.route.ascent || 0)) < 25);
+    if (!dup) out.push(a);
+  }
+  return out;
 }
 // ===== Kolorowanie trasy na mapie (typ drogi / wzniesienia) =====
 // łączy kolejne współrzędne o tym samym kolorze w odcinki [{pts,color}] (sąsiednie odcinki dzielą punkt → linia ciągła)
@@ -501,7 +518,7 @@ const PLAN_INTENTS_WALK = [
 ];
 const planIntentsFor = (a: string) => (a === 'walk' ? PLAN_INTENTS_WALK : PLAN_INTENTS_BIKE);
 const PLAN_AVOID = [
-  { key: 'cars', label: 'Ruchliwe drogi z autami', ion: 'car-outline' },
+  { key: 'cars', label: 'Ruchliwe drogi', ion: 'car-outline' },
   { key: 'steep', label: 'Strome podjazdy', ion: 'trending-up-outline' },
 ];
 // chipy informacyjne (transparentność, nie blokują trasy)
@@ -703,7 +720,7 @@ export default function App() {
   const [activity, setActivityState] = useState<'bike' | 'walk'>('bike');
   // planowanie tras
   const [planPts, setPlanPts] = useState<number[][]>([]);
-  const [planPrefs, setPlanPrefs] = useState<any>({ intents: ['quiet'], avoid: [], themes: [] });
+  const [planPrefs, setPlanPrefs] = useState<any>({ intents: ['quiet'], avoid: { cars: 0, steep: 0 }, themes: [] });
   const [planRoute, setPlanRoute] = useState<any>(null);
   const [planAlts, setPlanAlts] = useState<any[]>([]); // alternatywy: jedna trasa na wybraną intencję
   const [activeAlt, setActiveAlt] = useState(0);
@@ -754,7 +771,7 @@ export default function App() {
       if (ms) setMapStyleState(ms);
       if (mr) { try { setSavedRoutes(JSON.parse(mr)); } catch {} }
       if (fv) { try { setFavs(JSON.parse(fv)); } catch {} }
-      if (ac === 'walk' || ac === 'bike') { setActivityState(ac); CURRENT_ACTIVITY = ac; setPlanPrefs({ intents: ['quiet'], avoid: [], themes: [] }); }
+      if (ac === 'walk' || ac === 'bike') { setActivityState(ac); CURRENT_ACTIVITY = ac; setPlanPrefs({ intents: ['quiet'], avoid: { cars: 0, steep: 0 }, themes: [] }); }
       if (th) { try { const arr = JSON.parse(th); if (Array.isArray(arr)) setTypeHidden(arr); } catch {} }
       if (rd) { const n = +rd; if (n > 0) setNearbyRadius(n); }
       if (qz) { try { const q = JSON.parse(qz); if (q && typeof q.points === 'number' && q.done) setQuizState(q); } catch {} }
@@ -773,7 +790,7 @@ export default function App() {
   useEffect(() => { if (prefsLoaded.current) AsyncStorage.setItem('poiRadius', String(nearbyRadius)); }, [nearbyRadius]);
   useEffect(() => { if (prefsLoaded.current) AsyncStorage.setItem('quizState', JSON.stringify(quizState)); }, [quizState]);
   const toggleFav = (id: string) => { setFavs((prev) => { const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]; AsyncStorage.setItem('favRoutes', JSON.stringify(next)); return next; }); };
-  const setActivity = (a: 'bike' | 'walk') => { setActivityState(a); CURRENT_ACTIVITY = a; AsyncStorage.setItem('activityMode', a); setPlanPrefs({ intents: ['quiet'], avoid: [], themes: [] }); setPlanPts([]); setPlanRoute(null); setPlanAlts([]); setNearby([]); setAddedPois([]); };
+  const setActivity = (a: 'bike' | 'walk') => { setActivityState(a); CURRENT_ACTIVITY = a; AsyncStorage.setItem('activityMode', a); setPlanPrefs({ intents: ['quiet'], avoid: { cars: 0, steep: 0 }, themes: [] }); setPlanPts([]); setPlanRoute(null); setPlanAlts([]); setNearby([]); setAddedPois([]); };
   useEffect(() => { if (mapReady.current) callMap('setTheme', theme); }, [theme]);
   useEffect(() => { if (mapReady.current) callMap('setMapStyle', mapStyle); }, [mapStyle]);
   const toggleTheme = () => { const nt = theme === 'dark' ? 'light' : 'dark'; setThemeState(nt); AsyncStorage.setItem('theme', nt); };
@@ -807,6 +824,7 @@ export default function App() {
       if (m.type === 'wpmove') setPlanPts((prev) => prev.map((p, i) => (i === m.idx ? [m.lat, m.lon] : p)));
       if (m.type === 'wpdelete') Alert.alert('Usunąć punkt?', 'Punkt trasy zostanie usunięty.', [{ text: 'Anuluj', style: 'cancel' }, { text: 'Usuń', style: 'destructive', onPress: () => setPlanPts((prev) => prev.filter((_, i) => i !== m.idx)) }]);
       if (m.type === 'nearbytap') setNearbyTap({ idx: m.idx });
+      if (m.type === 'suggesttap') { const p = suggestShownRef.current[m.idx]; if (p) setSheet(p); }
       if (m.type === 'genpick') { setGenAreaState({ lat: m.lat, lon: m.lon }); callMap('setGenArea', m.lat, m.lon, genRadius, true); }
     } catch {}
   };
@@ -856,36 +874,50 @@ export default function App() {
     let cancelled = false; setPlanLoading(true);
     const intents = (planPrefs.intents && planPrefs.intents.length) ? planPrefs.intents : ['quiet'];
     const opts = planIntentsFor(activity).filter((o) => intents.includes(o.key));
-    Promise.all(opts.map((o) => routeThrough(planPts, o.profile).then((r) => (r && r.coords && r.coords.length >= 2) ? { key: o.key, label: o.label, ion: o.ion, route: r } : null)))
-      .then((list) => {
-        if (cancelled) return;
-        setPlanLoading(false); setNearby([]); setPlanPoiPool([]);
-        setPlanAlts(list.filter(Boolean)); // wybór aktywnej → efekt poniżej
-      });
+    const variants = opts.length > 1 ? [0, 1] : [0, 1, 2]; // kilka tras na kategorię; mniej wariantów gdy wiele kategorii (mix)
+    const jobs: Promise<any>[] = [];
+    opts.forEach((o) => variants.forEach((ai) => jobs.push(
+      routeThrough(planPts, o.profile, ai).then((r) => (r && r.coords && r.coords.length >= 2) ? { key: o.key, label: o.label, ion: o.ion, route: r } : null)
+    )));
+    Promise.all(jobs).then((list) => {
+      if (cancelled) return;
+      setPlanLoading(false); setNearby([]);
+      const alts = dedupAlts(list.filter(Boolean)); // odsiej zbieżne warianty
+      setPlanAlts(sortByAvoid(alts, planPrefs.avoid)); // wybór aktywnej → efekt [planAlts]
+    });
     return () => { cancelled = true; };
   }, [planPts, (planPrefs.intents || []).join(','), activity, screen]);
 
-  // wybór aktywnej alternatywy (miękkie „unikać" tylko PRZESTAWIA wybór — nie blokuje, nie przelicza)
+  // miękkie „unikać" (suwaki) tylko PRZESORTOWUJE alternatywy — nie blokuje, nie przelicza
+  useEffect(() => { setPlanAlts((prev) => (prev.length < 2 ? prev : sortByAvoid(prev, planPrefs.avoid))); }, [planPrefs.avoid?.cars, planPrefs.avoid?.steep]);
+
+  // aktywna = najlepiej dopasowana (pierwsza po sortowaniu); rysuj na mapie
   useEffect(() => {
     if (!planAlts.length) { setPlanRoute(null); return; }
-    const avoid = planPrefs.avoid || [];
-    let best = 0;
-    if (avoid.includes('cars')) { let bv = 1e9; planAlts.forEach((a, i) => { const v = carPct(a.route); if (v < bv) { bv = v; best = i; } }); }
-    else if (avoid.includes('steep')) { let bv = 1e15; planAlts.forEach((a, i) => { const v = a.route.ascent || 0; if (v < bv) { bv = v; best = i; } }); }
-    setActiveAlt(best); setPlanRoute(planAlts[best].route);
-    callMap('setPlanRoute', JSON.stringify(planAlts[best].route.coords));
-  }, [planAlts, (planPrefs.avoid || []).join(',')]);
+    setActiveAlt(0); setPlanRoute(planAlts[0].route);
+    callMap('setPlanRoute', JSON.stringify(planAlts[0].route.coords));
+  }, [planAlts]);
 
-  // pula POI w okolicy trasy do chipów „atrakcje" — TYLKO gdy wybrano „co zobaczyć" (Wikipedia, szybkie)
+  // rysuj sugerowane POI (po wyborze motywów) na mapie — chowane gdy otwarty panel „Punkty w pobliżu" (osobne markery)
+  const suggestShownRef = useRef<any[]>([]);
+  const drawSuggest = (pool: any[], hide?: boolean) => {
+    const themes = planPrefs.themes || [];
+    if (hide || !themes.length) { suggestShownRef.current = []; callMap('setSuggestPois', JSON.stringify([])); return; }
+    const want = new Set(themes.map((k: string) => THEME_TO_T[k]));
+    const show = pool.filter((p: any) => want.has(themeFromKind(p.kind))).slice(0, 40);
+    suggestShownRef.current = show;
+    callMap('setSuggestPois', JSON.stringify(show));
+  };
+  // POI w okolicy trasy — TYLKO gdy wybrano „co zobaczyć"; to samo źródło co „Punkty w pobliżu" (Overpass: zabytki/natura/jedzenie)
   useEffect(() => {
     const themes = planPrefs.themes || [];
-    if (screen !== 'plan' || !planRoute?.coords || !themes.length) { setPlanPoiPool([]); return; }
+    if (screen !== 'plan' || !planRoute?.coords || !themes.length) { setPlanPoiPool([]); drawSuggest([]); return; }
     let cancelled = false;
-    const mid = planRoute.coords[Math.floor(planRoute.coords.length / 2)];
-    const radius = Math.min(10000, Math.max(1500, Math.round((planRoute.distM || 3000) / 2)));
-    fetchAreaPois(mid[0], mid[1], radius, []).then((r) => { if (!cancelled) setPlanPoiPool(r); }).catch(() => {});
+    fetchNearbyPlaces(planRoute.coords, activity).then((r) => { if (cancelled) return; setPlanPoiPool(r); drawSuggest(r, nearbyOpen); }).catch(() => {});
     return () => { cancelled = true; };
   }, [planRoute?.coords?.length, (planPrefs.themes || []).join(','), screen]);
+  // chowaj/odsłaniaj sugestie przy wchodzeniu/wychodzeniu z „Punkty w pobliżu"
+  useEffect(() => { if (screen === 'plan') drawSuggest(planPoiPool, nearbyOpen); }, [nearbyOpen]);
 
   const selectAlt = (i: number) => { if (!planAlts[i]) return; setActiveAlt(i); setPlanRoute(planAlts[i].route); callMap('setPlanRoute', JSON.stringify(planAlts[i].route.coords)); };
   const planUndo = () => setPlanPts((p) => p.slice(0, -1));
@@ -1623,7 +1655,7 @@ function PlanScreen({ C, s, activity, pts, prefs, setPrefs, planRoute, alts, act
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const intents: string[] = prefs?.intents || [];
-  const avoid: string[] = prefs?.avoid || [];
+  const avoid: any = prefs?.avoid || {};
   const themes: string[] = prefs?.themes || [];
   const toggleIn = (field: string, k: string) => { const cur: string[] = prefs?.[field] || []; const has = cur.includes(k); const next = has ? cur.filter((x) => x !== k) : [...cur, k]; if (field === 'intents' && !next.length) return; setPrefs({ ...prefs, [field]: next }); };
   const intentSummary = intents.length ? planIntentsFor(activity).filter((o: any) => intents.includes(o.key)).map((o: any) => o.label).join(' · ') : 'Wybierz charakter';
@@ -1662,12 +1694,15 @@ function PlanScreen({ C, s, activity, pts, prefs, setPrefs, planRoute, alts, act
                 <Ionicons name={o.ion} size={15} color={on ? C.bg : C.txt} /><Text style={[s.genThemeTxt, on && { color: C.bg }]}>{o.label}</Text>
               </TouchableOpacity>
             ); })}</View>
-            <Text style={s.groupLabel}>Czego unikać <Text style={{ color: C.dim, fontWeight: '400' }}>(nie blokuje — wybiera najlepszą)</Text></Text>
-            <View style={s.genChipRow}>{PLAN_AVOID.map((o: any) => { const on = avoid.includes(o.key); return (
-              <TouchableOpacity key={o.key} style={[s.genThemeChip, on && s.genThemeChipOn]} activeOpacity={0.8} onPress={() => toggleIn('avoid', o.key)}>
-                <Ionicons name={o.ion} size={15} color={on ? C.bg : C.txt} /><Text style={[s.genThemeTxt, on && { color: C.bg }]}>{o.label}</Text>
-              </TouchableOpacity>
-            ); })}</View>
+            <Text style={s.groupLabel}>Czego unikać <Text style={{ color: C.dim, fontWeight: '400' }}>(suwak — kompromis, nie blokuje)</Text></Text>
+            {PLAN_AVOID.map((o: any) => { const v = avoid[o.key] || 0; return (
+              <View key={o.key} style={s.prefRow}>
+                <Ionicons name={o.ion} size={15} color={C.dim} />
+                <Text style={[s.prefLabel, { width: 96 }]} numberOfLines={1}>{o.label}</Text>
+                <View style={{ flex: 1 }}><Slider C={C} s={s} value={v} onChange={(nv: number) => setPrefs({ ...prefs, avoid: { ...avoid, [o.key]: nv } })} /></View>
+                <Text style={[s.prefPct, { width: 62, fontSize: 11 }]}>{v ? v + '%' : 'obojętne'}</Text>
+              </View>
+            ); })}
             <Text style={s.groupLabel}>Co zobaczyć po drodze <Text style={{ color: C.dim, fontWeight: '400' }}>(filtruje „Punkty w pobliżu")</Text></Text>
             <View style={s.genChipRow}>{THEME_OPTS.map((o: any) => { const on = themes.includes(o.key); return (
               <TouchableOpacity key={o.key} style={[s.genThemeChip, on && s.genThemeChipOn]} activeOpacity={0.8} onPress={() => toggleIn('themes', o.key)}>
