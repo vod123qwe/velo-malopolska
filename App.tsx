@@ -426,7 +426,14 @@ function themeFromKind(kind: string): string {
   return 'atrakcje';
 }
 // POI z Wikipedia geosearch — SZYBKIE i pewne (Overpass był wolny/flaky); od razu tag wiki → opisy/quizy działają
-async function fetchAreaPois(lat: number, lon: number, radius: number, _themes: string[]): Promise<any[]> {
+// cache POI per obszar (promise) → drugi raz natychmiast; pozwala PREFETCHOWAĆ punkty już przy wyborze obszaru
+const POI_CACHE: Record<string, Promise<any[]>> = {};
+function fetchAreaPois(lat: number, lon: number, radius: number, _themes: string[]): Promise<any[]> {
+  const key = `${lat.toFixed(3)},${lon.toFixed(3)},${radius}`;
+  if (!POI_CACHE[key]) POI_CACHE[key] = _fetchAreaPois(lat, lon, radius).catch((e) => { delete POI_CACHE[key]; throw e; });
+  return POI_CACHE[key];
+}
+async function _fetchAreaPois(lat: number, lon: number, radius: number): Promise<any[]> {
   const url = `https://pl.wikipedia.org/w/api.php?action=query&format=json&list=geosearch&gscoord=${lat}%7C${lon}&gsradius=${Math.min(10000, Math.max(800, radius))}&gslimit=40`;
   try {
     const r = await fetchT(url, {}, 12000);
@@ -526,17 +533,20 @@ async function buildThemedRoute(area: any, cfg: any, activity: string, group: an
   };
 }
 // Generuje JEDNĄ trasę na każdą kategorię, która ma punkty w obszarze (różnorodność = różne tematy)
-async function generateRoutes(area: any, cfg: any, activity: string): Promise<any[]> {
+async function generateRoutes(area: any, cfg: any, activity: string, onPartial?: (rs: any[]) => void): Promise<any[]> {
   CURRENT_ACTIVITY = activity; // by routeThrough użył właściwych profili
   let pois = await fetchAreaPois(area.lat, area.lon, area.radius, GEN_THEMES.map((t) => t.key));
   // gęste centrum (np. Kraków) → zapytanie potrafi timeoutować; ponów z mniejszym promieniem (lżejsze, szybsze)
   if (!pois.length && area.radius > 800) pois = await fetchAreaPois(area.lat, area.lon, Math.round(area.radius * 0.5), GEN_THEMES.map((t) => t.key));
   if (!pois.length) return [];
   const groups = GEN_THEMES.map((th, i) => ({ th, i, group: pois.filter((p) => p.theme === th.key) })).filter((g) => g.group.length >= 1);
-  // wszystkie kategorie liczone RÓWNOLEGLE (każda z własnym timeoutem) → szybko, odporne na zawieszenie
-  const built = (await Promise.all(groups.map((g) => buildThemedRoute(area, cfg, activity, g.group, g.th, g.i).catch(() => null)))).filter(Boolean);
-  // ranking wg wag użytkownika (co dla niego najważniejsze) → najlepiej pasujące trasy na górze
-  return built.sort((a: any, b: any) => scoreRoute(b, cfg.prefs) - scoreRoute(a, cfg.prefs));
+  const byScore = (a: any, b: any) => scoreRoute(b, cfg.prefs) - scoreRoute(a, cfg.prefs);
+  // wszystkie kategorie liczone RÓWNOLEGLE; każda trasa pokazuje się GDY GOTOWA (nie czekamy na najwolniejszą)
+  const acc: any[] = [];
+  await Promise.all(groups.map((g) => buildThemedRoute(area, cfg, activity, g.group, g.th, g.i)
+    .then((r) => { if (r) { acc.push(r); if (onPartial) onPartial(acc.slice().sort(byScore)); } })
+    .catch(() => {})));
+  return acc.sort(byScore);
 }
 
 // Wysokość dla gotowych tras (open-elevation, próbkowane)
@@ -1036,9 +1046,9 @@ export default function App() {
   const enterGenerator = () => { setGenStep('area'); setGenAreaState(null); setGenResults([]); setGenCfg((c: any) => ({ ...c, activity })); setScreen('generate'); setTimeout(() => { callMap('clearAll'); callMap('setGenPick', true); }, 60); };
   const exitGenerator = () => { callMap('setGenPick', false); callMap('clearGen'); setScreen('tab'); setTab('dashboard'); };
   const setGenRadiusV = (r: number) => { setGenRadius(r); if (genArea) callMap('setGenArea', genArea.lat, genArea.lon, r, false); };
-  const genNext = () => { callMap('setGenPick', false); setGenStep('config'); };
+  const genNext = () => { callMap('setGenPick', false); setGenStep('config'); if (genArea) fetchAreaPois(genArea.lat, genArea.lon, genRadius, []).catch(() => {}); }; // prewarm punktów, póki user ustawia preferencje
   const genBack = () => { if (genStep === 'results') setGenStep('config'); else if (genStep === 'config') { setGenStep('area'); callMap('setGenPick', true); if (genArea) callMap('setGenArea', genArea.lat, genArea.lon, genRadius, true); } else exitGenerator(); };
-  const runGenerate = async () => { if (!genArea) return; setGenStep('results'); setGenLoading(true); try { const res = await generateRoutes({ ...genArea, radius: genRadius }, genCfg, genCfg.activity); setGenResults(res); } catch { setGenResults([]); } setGenLoading(false); };
+  const runGenerate = async () => { if (!genArea) return; setGenStep('results'); setGenLoading(true); setGenResults([]); try { const res = await generateRoutes({ ...genArea, radius: genRadius }, genCfg, genCfg.activity, (partial) => setGenResults(partial)); setGenResults(res); } catch { setGenResults([]); } setGenLoading(false); };
   const genSave = (r: any) => { const next = [r, ...savedRoutes]; setSavedRoutes(next); AsyncStorage.setItem('myRoutes', JSON.stringify(next)); announceBanner('ZAPISANO TRASĘ', r.name, 'checkmark-circle', fmtKm(r.distance * 1000) + ' km'); };
   const genFocus = (r: any) => { setRoute(r); callMap('clearGen'); callMap('setRoute', JSON.stringify(r)); }; // rysuj wybraną trasę na mapie pod sliderem
   const genPreview = (r: any) => { callMap('setGenPick', false); callMap('clearGen'); openDetail(r, 'generate'); };
@@ -2273,7 +2283,7 @@ function GenBrowCard({ C, s, route, width, active, onPreview, onEdit, onSave, on
   );
 }
 
-function GenBrowser({ C, s, routes, onClose, onBack, onSave, onPreview, onEdit, onRegenerate, onFocus, onOpenPoi }: any) {
+function GenBrowser({ C, s, routes, loading, onClose, onBack, onSave, onPreview, onEdit, onRegenerate, onFocus, onOpenPoi }: any) {
   const W = Dimensions.get('window').width, CARD = W - 36, GAP = 12;
   const [idx, setIdx] = useState(0);
   const ref = useRef<ScrollView>(null);
@@ -2295,7 +2305,10 @@ function GenBrowser({ C, s, routes, onClose, onBack, onSave, onPreview, onEdit, 
       </View>
 
       <View style={s.genBrowBottom}>
-        <View style={s.countPill}><Text style={s.exploreCountTxt}>{idx + 1} z {routes.length}</Text></View>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <View style={s.countPill}><Text style={s.exploreCountTxt}>{idx + 1} z {routes.length}</Text></View>
+          {loading && <View style={[s.countPill, { flexDirection: 'row', gap: 6, alignItems: 'center' }]}><ActivityIndicator size="small" color={C.accent} /><Text style={s.exploreCountTxt}>dokładam…</Text></View>}
+        </View>
         <ScrollView ref={ref} horizontal snapToInterval={CARD + GAP} decelerationRate="fast" showsHorizontalScrollIndicator={false} onMomentumScrollEnd={onEnd} contentContainerStyle={{ paddingHorizontal: 18, gap: GAP }}>
           {routes.map((r: any, i: number) => <GenBrowCard key={r.id} C={C} s={s} route={r} width={CARD} active={i === idx} onPreview={() => onPreview(r)} onEdit={() => onEdit(r)} onSave={() => onSave(r)} onOpenPoi={onOpenPoi} />)}
         </ScrollView>
@@ -2309,9 +2322,16 @@ function GenBrowser({ C, s, routes, onClose, onBack, onSave, onPreview, onEdit, 
 }
 
 // Suwak 0-100 (PanResponder — działa na telefonie i w PWA)
+const SLIDER_STEPS = 6; // 6 breakpointów: 0 / 20 / 40 / 60 / 80 / 100
+function snapStep(raw: number): number {
+  const max = SLIDER_STEPS - 1;
+  const idx = Math.round((Math.max(0, Math.min(100, raw)) / 100) * max);
+  return Math.round((idx / max) * 100);
+}
 function Slider({ C, s, value, onChange }: any) {
   const wRef = useRef(0);
-  const setX = (x: number) => { const w = wRef.current || 1; onChange(Math.max(0, Math.min(100, Math.round((x / w) * 100)))); };
+  // children mają pointerEvents=none → locationX jest ZAWSZE względem całego suwaka (inaczej tap w kciuk/wypełnienie dawał zły X i wartość skakała)
+  const setX = (x: number) => { const w = wRef.current || 1; onChange(snapStep((x / w) * 100)); };
   const pan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
@@ -2320,15 +2340,17 @@ function Slider({ C, s, value, onChange }: any) {
   })).current;
   return (
     <View onLayout={(e) => { wRef.current = e.nativeEvent.layout.width; }} {...pan.panHandlers} style={s.sliderWrap}>
-      <View style={s.sliderTrack}><View style={[s.sliderFill, { width: (value + '%') as any }]} /></View>
-      <View style={[s.sliderThumb, { left: (value + '%') as any }]} />
+      <View pointerEvents="none" style={s.sliderTrack}><View style={[s.sliderFill, { width: (value + '%') as any }]} /></View>
+      <View pointerEvents="none" style={s.sliderTicks}>
+        {Array.from({ length: SLIDER_STEPS }).map((_, i) => (<View key={i} style={[s.sliderTick, { backgroundColor: (value >= (i / (SLIDER_STEPS - 1)) * 100 - 1) ? C.bg : C.dim }]} />))}
+      </View>
+      <View pointerEvents="none" style={[s.sliderThumb, { left: (value + '%') as any }]} />
     </View>
   );
 }
 // Multi-select pillsy + suwaki % („co jest dla mnie ważne") — wspólne dla generatora i planera
 function WeightedPrefs({ C, s, prefs, onChange, options }: any) {
-  const total = (Object.values(prefs) as number[]).reduce((a, b) => a + (b || 0), 0) || 1;
-  const toggle = (k: string) => { const np = { ...prefs }; if (k in np) delete np[k]; else np[k] = 50; onChange(np); };
+  const toggle = (k: string) => { const np = { ...prefs }; if (k in np) delete np[k]; else np[k] = 60; onChange(np); };
   const sel = options.filter((o: any) => o.key in prefs);
   return (
     <View>
@@ -2339,12 +2361,12 @@ function WeightedPrefs({ C, s, prefs, onChange, options }: any) {
           </TouchableOpacity>
         ); })}
       </View>
-      {sel.length > 0 && <Text style={[s.sub, { fontSize: 12, marginTop: 12 }]}>Jak ważne (przeciągnij; % to udział):</Text>}
+      {sel.length > 0 && <Text style={[s.sub, { fontSize: 12, marginTop: 12 }]}>Jak ważne (przeciągnij):</Text>}
       {sel.map((o: any) => (
         <View key={o.key} style={s.prefRow}>
           <Text style={s.prefLabel} numberOfLines={1}>{o.label}</Text>
           <View style={{ flex: 1 }}><Slider C={C} s={s} value={prefs[o.key]} onChange={(v: number) => onChange({ ...prefs, [o.key]: v })} /></View>
-          <Text style={s.prefPct}>{Math.round((prefs[o.key] / total) * 100)}%</Text>
+          <Text style={s.prefPct}>{prefs[o.key]}%</Text>
         </View>
       ))}
     </View>
@@ -2413,14 +2435,14 @@ function GeneratorScreen({ C, s, step, area, radius, setRadius, cfg, setCfg, loa
   }
 
   // ----- results: pełnoekranowy przegląd po kategoriach -----
-  if (loading) {
+  if (loading && !results.length) {
     return (
       <View style={s.genLoaderWrap}>
         <View style={s.genLoaderCard}><ActivityIndicator size="large" color={C.accent} /><Text style={[s.sub, { marginTop: 12 }]}>Układam trasy w okolicy…</Text></View>
       </View>
     );
   }
-  if (!results.length) {
+  if (!loading && !results.length) {
     return (
       <View style={s.genPanel}>
         <View style={s.genHeader}>
@@ -2436,7 +2458,7 @@ function GeneratorScreen({ C, s, step, area, radius, setRadius, cfg, setCfg, loa
       </View>
     );
   }
-  return <GenBrowser C={C} s={s} routes={results} onClose={onClose} onBack={onBack} onSave={onSave} onPreview={onPreview} onEdit={onEdit} onRegenerate={onGenerate} onFocus={onFocus} onOpenPoi={onOpenPoi} />;
+  return <GenBrowser C={C} s={s} routes={results} loading={loading} onClose={onClose} onBack={onBack} onSave={onSave} onPreview={onPreview} onEdit={onEdit} onRegenerate={onGenerate} onFocus={onFocus} onOpenPoi={onOpenPoi} />;
 }
 
 /* ---------- styles ---------- */
@@ -2556,6 +2578,8 @@ function makeStyles(C: C) {
     sliderWrap: { height: 30, justifyContent: 'center' },
     sliderTrack: { height: 6, borderRadius: 3, backgroundColor: C.stroke, overflow: 'hidden' },
     sliderFill: { height: 6, backgroundColor: C.accent, borderRadius: 3 },
+    sliderTicks: { position: 'absolute', left: 0, right: 0, top: 13, flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 2 },
+    sliderTick: { width: 4, height: 4, borderRadius: 2 },
     sliderThumb: { position: 'absolute', top: 6, marginLeft: -9, width: 18, height: 18, borderRadius: 9, backgroundColor: C.txt, borderWidth: 2, borderColor: C.bg },
     prefRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 8 },
     prefLabel: { color: C.txt, fontSize: 13, fontWeight: '600', width: 108 },
