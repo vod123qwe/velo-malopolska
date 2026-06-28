@@ -1555,7 +1555,7 @@ function PlanScreen({ C, s, activity, pts, prefs, setPrefs, planRoute, loading, 
           <Text style={s.detailsToggleTxt}>Charakter trasy{selCount ? ` (${selCount})` : ''}</Text>
           <Ionicons name={prefsOpen ? 'chevron-up' : 'chevron-down'} size={16} color={C.dim} />
         </TouchableOpacity>
-        {prefsOpen && <ScrollView style={{ maxHeight: 230, marginTop: 4 }} nestedScrollEnabled showsVerticalScrollIndicator={false}><WeightedPrefs C={C} s={s} prefs={prefs || {}} onChange={setPrefs} options={genPrefsFor(activity)} /></ScrollView>}
+        {prefsOpen && <ScrollView style={{ maxHeight: 230, marginTop: 4 }} contentContainerStyle={{ paddingRight: 50 }} nestedScrollEnabled showsVerticalScrollIndicator={false}><WeightedPrefs C={C} s={s} prefs={prefs || {}} onChange={setPrefs} options={genPrefsFor(activity)} /></ScrollView>}
       </View>
 
       <TouchableOpacity style={[s.fitBtn, { top: 198 }]} activeOpacity={0.8} onPress={onFit}>
@@ -2370,13 +2370,17 @@ function snapStep(raw: number): number {
 }
 function Slider({ C, s, value, onChange }: any) {
   const wRef = useRef(0);
-  // children mają pointerEvents=none → locationX jest ZAWSZE względem całego suwaka (inaczej tap w kciuk/wypełnienie dawał zły X i wartość skakała)
-  const setX = (x: number) => { const w = wRef.current || 1; onChange(snapStep((x / w) * 100)); };
+  // cbRef = ZAWSZE najświeższy onChange (z aktualnymi prefs). Bez tego zamrożony PanResponder pisał po STARYCH
+  // prefs → znikał wiersz (gdy stan nie miał później dodanego pilla) lub sąsiedni suwak wracał do starej wartości.
+  const cbRef = useRef(onChange); cbRef.current = onChange;
+  // apply używa TYLKO refów (wRef, cbRef) → zamrożona w PanResponderze pierwsza kopia i tak czyta najnowsze wartości.
+  // children mają pointerEvents=none → locationX jest ZAWSZE względem całego suwaka (inaczej tap w kciuk dawał zły X)
+  const apply = (x: number) => { const w = wRef.current || 1; cbRef.current(snapStep((x / w) * 100)); };
   const pan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
-    onPanResponderGrant: (e: any) => setX(e.nativeEvent.locationX),
-    onPanResponderMove: (e: any) => setX(e.nativeEvent.locationX),
+    onPanResponderGrant: (e: any) => apply(e.nativeEvent.locationX),
+    onPanResponderMove: (e: any) => apply(e.nativeEvent.locationX),
   })).current;
   return (
     <View onLayout={(e) => { wRef.current = e.nativeEvent.layout.width; }} {...pan.panHandlers} style={s.sliderWrap}>
