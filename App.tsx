@@ -346,24 +346,44 @@ function classifyOsm(t: any): { kind: string; name: string } {
   else if (t.shop) kind = 'Sklep'; else if (t.leisure === 'park' || t.natural === 'water') kind = 'Atrakcja';
   return { kind, name };
 }
-async function fetchAreaPois(lat: number, lon: number, radius: number, themes: string[]): Promise<any[]> {
-  const parts: string[] = [];
-  GEN_THEMES.filter((t) => themes.includes(t.key)).forEach((t) => t.q.forEach((q) => parts.push(`${q}(around:${radius},${lat},${lon});`)));
-  if (!parts.length) parts.push(`nwr["tourism"~"attraction|viewpoint|museum"]["name"](around:${radius},${lat},${lon});`);
-  const q = `[out:json][timeout:25];(${parts.join('')});out center tags 150;`;
-  const EPS = ['https://overpass-api.de/api/interpreter', 'https://overpass.private.coffee/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
-  let j: any = null;
-  for (const ep of EPS) { try { const r = await fetchT(ep, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'data=' + encodeURIComponent(q) }, 20000); const d = await r.json(); if (d && Array.isArray(d.elements)) { j = d; break; } } catch {} }
-  if (!j) return [];
-  const out: any[] = [], seen = new Set();
-  for (const e of (j.elements || [])) {
-    const t = e.tags || {}; const la = e.lat ?? e.center?.lat, lo = e.lon ?? e.center?.lon; if (la == null || !t.name) continue;
-    const { kind, name } = classifyOsm(t); if (!name) continue;
-    const key = name + Math.round(la * 1000); if (seen.has(key)) continue; seen.add(key);
-    out.push({ name, kind, lat: +la.toFixed(5), lon: +lo.toFixed(5), wikipedia: t.wikipedia || null, theme: poiThemeOf(t, kind), d: hav([lat, lon], [la, lo]) });
-  }
-  out.sort((a, b) => a.d - b.d);
-  return out;
+const GEN_SKIP = /\b(gmina|powiat|wojew|cyrku|dekanat|parafia|cmentarz|stadion|gromada|herb|wybory|kategoria|szkoła|liceum|przystanek|dworzec)/i;
+function kindFromTitle(t: string): string {
+  const s = t.toLowerCase();
+  if (s.includes('zamek')) return 'Zamek';
+  if (s.includes('ruiny')) return 'Ruiny';
+  if (s.includes('kości') || s.includes('bazylika') || s.includes('kaplica') || s.includes('sanktuarium') || s.includes('cerkiew') || s.includes('klasztor') || s.includes('opactwo')) return 'Kościół';
+  if (s.includes('muzeum') || s.includes('skansen') || s.includes('synagoga') || s.includes('pałac') || s.includes('dwór') || s.includes('dworek') || s.includes('ratusz') || s.includes('pomnik') || s.includes('willa') || s.includes('kamienica')) return 'Zabytek';
+  if (s.includes('szczyt') || s.includes('góra ') || s.includes('wierch') || s.includes('przełęcz') || s.includes('hala ')) return 'Szczyt';
+  if (s.includes('jaskinia') || s.includes('grota')) return 'Jaskinia';
+  if (s.includes('wodospad') || s.includes('jezioro') || s.includes('zalew') || s.includes('staw')) return 'Punkt widokowy';
+  if (s.includes('park') || s.includes('ogród') || s.includes('rynek') || s.includes('rezerwat')) return 'Atrakcja';
+  if (s.includes('restauracja') || s.includes('kawiarnia')) return 'Restauracja';
+  return 'Atrakcja';
+}
+function themeFromKind(kind: string): string {
+  if (kind === 'Zamek' || kind === 'Ruiny' || kind === 'Zabytek') return 'historia';
+  if (kind === 'Restauracja' || kind === 'Kawiarnia') return 'jedzenie';
+  if (kind === 'Punkt widokowy' || kind === 'Szczyt' || kind === 'Jaskinia') return 'przyroda';
+  return 'atrakcje';
+}
+// POI z Wikipedia geosearch — SZYBKIE i pewne (Overpass był wolny/flaky); od razu tag wiki → opisy/quizy działają
+async function fetchAreaPois(lat: number, lon: number, radius: number, _themes: string[]): Promise<any[]> {
+  const url = `https://pl.wikipedia.org/w/api.php?action=query&format=json&list=geosearch&gscoord=${lat}%7C${lon}&gsradius=${Math.min(10000, Math.max(800, radius))}&gslimit=40`;
+  try {
+    const r = await fetchT(url, {}, 12000);
+    const j = await r.json();
+    const arr = j?.query?.geosearch || [];
+    const out: any[] = [], seen = new Set();
+    for (const g of arr) {
+      const t = g.title;
+      if (GEN_SKIP.test(t) || /^ulica |^aleja /i.test(t)) continue;
+      const key = t.replace(/ w .*/, ''); if (seen.has(key)) continue; seen.add(key);
+      const kind = kindFromTitle(t);
+      out.push({ name: t, kind, lat: +g.lat.toFixed(5), lon: +g.lon.toFixed(5), wikipedia: 'pl:' + t, theme: themeFromKind(kind), d: hav([lat, lon], [g.lat, g.lon]) });
+    }
+    out.sort((a, b) => a.d - b.d);
+    return out;
+  } catch { return []; }
 }
 function poiThemeOf(t: any, kind: string): string {
   if (kind === 'Zamek' || kind === 'Ruiny' || kind === 'Zabytek') return 'historia';
@@ -374,13 +394,47 @@ function poiThemeOf(t: any, kind: string): string {
   if (t.tourism === 'artwork' || t.amenity === 'theatre' || t.amenity === 'arts_centre') return 'sztuka';
   return 'atrakcje';
 }
-function genProfileKey(activity: string, cfg: any): string {
-  // pieszo: hiking-mountain (footpathy/leśne/przejścia) vs hiking-beta (spacer)
-  if (activity === 'walk') return cfg.trails ? 'szlak' : 'spacerowa';
-  // rower: nawierzchnia/charakter — ścieżki rowerowe (safety/Velo) / szutry (gravel) / najszybsza (fastbike)
-  if (cfg.bikeStyle === 'gravel') return 'szutrowa';
-  if (cfg.bikeStyle === 'fast') return 'szybka';
-  return 'rowerowa';
+// Ważone preferencje („co dla mnie ważne") — multi-select + suwaki %
+const GEN_PREFS_BIKE = [
+  { key: 'cyclepath', label: 'Ścieżki rowerowe', ion: 'bicycle-outline' },
+  { key: 'gravel', label: 'Szutry / off-road', ion: 'trail-sign-outline' },
+  { key: 'fast', label: 'Asfalt / szybko', ion: 'flash-outline' },
+  { key: 'flat', label: 'Bez wzniesień', ion: 'remove-outline' },
+  { key: 'scenery', label: 'Widoki i natura', ion: 'leaf-outline' },
+  { key: 'culture', label: 'Zabytki i historia', ion: 'business-outline' },
+  { key: 'food', label: 'Kawiarnie po drodze', ion: 'cafe-outline' },
+  { key: 'quiet', label: 'Mało ruchu', ion: 'shield-checkmark-outline' },
+];
+const GEN_PREFS_WALK = [
+  { key: 'trails', label: 'Ścieżki i szlaki', ion: 'trail-sign-outline' },
+  { key: 'flat', label: 'Bez wzniesień', ion: 'remove-outline' },
+  { key: 'scenery', label: 'Widoki i natura', ion: 'leaf-outline' },
+  { key: 'culture', label: 'Zabytki i historia', ion: 'business-outline' },
+  { key: 'food', label: 'Kawiarnie po drodze', ion: 'cafe-outline' },
+];
+const genPrefsFor = (activity: string) => (activity === 'walk' ? GEN_PREFS_WALK : GEN_PREFS_BIKE);
+// najwyżej ważona nawierzchnia → profil routingu BRouter
+function prefProfile(activity: string, prefs: any): string {
+  prefs = prefs || {};
+  if (activity === 'walk') return (prefs.trails || 0) > 0 && (prefs.trails || 0) >= (prefs.flat || 0) ? 'szlak' : 'spacerowa';
+  const surf: any = { cyclepath: prefs.cyclepath || 0, gravel: prefs.gravel || 0, fast: prefs.fast || 0, quiet: prefs.quiet || 0 };
+  let best = '', bv = 0; for (const k in surf) if (surf[k] > bv) { bv = surf[k]; best = k; }
+  if (best === 'gravel') return 'szutrowa';
+  if (best === 'fast') return 'szybka';
+  return 'rowerowa'; // cyclepath / quiet / brak → safety (Velo)
+}
+// ranking wygenerowanych tras wg wag użytkownika
+function scoreRoute(r: any, prefs: any): number {
+  const tot = Object.values(prefs || {}).reduce((a: number, b: any) => a + (b || 0), 0) || 1;
+  const pois = r.pois || []; const n = pois.length || 1;
+  const cnt = (th: string) => pois.filter((p: any) => themeFromKind(p.kind) === th).length / n;
+  const flat = 1 - Math.min(1, (r.ascent || 0) / ((r.distance || 1) * 18));
+  let s = 0;
+  s += ((prefs.flat || 0) / tot) * flat;
+  s += ((prefs.scenery || 0) / tot) * cnt('przyroda');
+  s += ((prefs.culture || 0) / tot) * cnt('historia');
+  s += ((prefs.food || 0) / tot) * cnt('jedzenie');
+  return s;
 }
 // Buduje jedną trasę z puli POI danej KATEGORII (nearest-neighbor od środka)
 async function buildThemedRoute(area: any, cfg: any, activity: string, group: any[], theme: any, idx: number): Promise<any> {
@@ -398,7 +452,7 @@ async function buildThemedRoute(area: any, cfg: any, activity: string, group: an
   if (cfg.endCafe && theme.key !== 'jedzenie') { /* opcjonalna meta w kawiarni dla nie-gastro tras dodaje sens */ }
   const wpts: number[][] = [start, ...chosen.map((p) => [p.lat, p.lon])];
   if (cfg.shape === 'loop') wpts.push(start);
-  const res = await routeThrough(wpts, genProfileKey(activity, cfg));
+  const res = await routeThrough(wpts, prefProfile(activity, cfg.prefs));
   if (!res || !res.coords || res.coords.length < 2) return null;
   const km = res.distM / 1000;
   const nm = (cfg.game ? 'Gra: ' : '') + theme.label + ' • ' + km.toFixed(1) + ' km';
@@ -421,8 +475,9 @@ async function generateRoutes(area: any, cfg: any, activity: string): Promise<an
   if (!pois.length) return [];
   const groups = GEN_THEMES.map((th, i) => ({ th, i, group: pois.filter((p) => p.theme === th.key) })).filter((g) => g.group.length >= 1);
   // wszystkie kategorie liczone RÓWNOLEGLE (każda z własnym timeoutem) → szybko, odporne na zawieszenie
-  const built = await Promise.all(groups.map((g) => buildThemedRoute(area, cfg, activity, g.group, g.th, g.i).catch(() => null)));
-  return built.filter(Boolean);
+  const built = (await Promise.all(groups.map((g) => buildThemedRoute(area, cfg, activity, g.group, g.th, g.i).catch(() => null)))).filter(Boolean);
+  // ranking wg wag użytkownika (co dla niego najważniejsze) → najlepiej pasujące trasy na górze
+  return built.sort((a: any, b: any) => scoreRoute(b, cfg.prefs) - scoreRoute(a, cfg.prefs));
 }
 
 // Wysokość dla gotowych tras (open-elevation, próbkowane)
@@ -489,7 +544,7 @@ export default function App() {
   const [genStep, setGenStep] = useState<'area' | 'config' | 'results'>('area');
   const [genArea, setGenAreaState] = useState<{ lat: number; lon: number } | null>(null);
   const [genRadius, setGenRadius] = useState(1500);
-  const [genCfg, setGenCfg] = useState<any>({ activity: 'walk', themes: ['historia', 'przyroda'], lengthKm: 5, trails: true, bikeStyle: 'cyclepath', shape: 'loop', game: false, endCafe: false });
+  const [genCfg, setGenCfg] = useState<any>({ activity: 'walk', lengthKm: 5, prefs: { trails: 60, scenery: 40 }, shape: 'loop', game: false, endCafe: false });
   const [genLoading, setGenLoading] = useState(false);
   const [genResults, setGenResults] = useState<any[]>([]);
   const answerQuiz = (name: string, correct: boolean) => setQuizState((prev) => {
@@ -504,7 +559,7 @@ export default function App() {
   const [activity, setActivityState] = useState<'bike' | 'walk'>('bike');
   // planowanie tras
   const [planPts, setPlanPts] = useState<number[][]>([]);
-  const [planProfile, setPlanProfile] = useState('rowerowa');
+  const [planPrefs, setPlanPrefs] = useState<any>({ cyclepath: 60, scenery: 40 });
   const [planRoute, setPlanRoute] = useState<any>(null);
   const [planLoading, setPlanLoading] = useState(false);
   const [nearby, setNearby] = useState<any[]>([]);
@@ -552,7 +607,7 @@ export default function App() {
       if (ms) setMapStyleState(ms);
       if (mr) { try { setSavedRoutes(JSON.parse(mr)); } catch {} }
       if (fv) { try { setFavs(JSON.parse(fv)); } catch {} }
-      if (ac === 'walk' || ac === 'bike') { setActivityState(ac); CURRENT_ACTIVITY = ac; setPlanProfile(ac === 'walk' ? 'spacerowa' : 'rowerowa'); }
+      if (ac === 'walk' || ac === 'bike') { setActivityState(ac); CURRENT_ACTIVITY = ac; setPlanPrefs(ac === 'walk' ? { trails: 60, scenery: 40 } : { cyclepath: 60, scenery: 40 }); }
       if (th) { try { const arr = JSON.parse(th); if (Array.isArray(arr)) setTypeHidden(arr); } catch {} }
       if (rd) { const n = +rd; if (n > 0) setNearbyRadius(n); }
       if (qz) { try { const q = JSON.parse(qz); if (q && typeof q.points === 'number' && q.done) setQuizState(q); } catch {} }
@@ -571,7 +626,7 @@ export default function App() {
   useEffect(() => { if (prefsLoaded.current) AsyncStorage.setItem('poiRadius', String(nearbyRadius)); }, [nearbyRadius]);
   useEffect(() => { if (prefsLoaded.current) AsyncStorage.setItem('quizState', JSON.stringify(quizState)); }, [quizState]);
   const toggleFav = (id: string) => { setFavs((prev) => { const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]; AsyncStorage.setItem('favRoutes', JSON.stringify(next)); return next; }); };
-  const setActivity = (a: 'bike' | 'walk') => { setActivityState(a); CURRENT_ACTIVITY = a; AsyncStorage.setItem('activityMode', a); setPlanProfile(a === 'walk' ? 'spacerowa' : 'rowerowa'); setPlanPts([]); setPlanRoute(null); setNearby([]); setAddedPois([]); };
+  const setActivity = (a: 'bike' | 'walk') => { setActivityState(a); CURRENT_ACTIVITY = a; AsyncStorage.setItem('activityMode', a); setPlanPrefs(a === 'walk' ? { trails: 60, scenery: 40 } : { cyclepath: 60, scenery: 40 }); setPlanPts([]); setPlanRoute(null); setNearby([]); setAddedPois([]); };
   useEffect(() => { if (mapReady.current) callMap('setTheme', theme); }, [theme]);
   useEffect(() => { if (mapReady.current) callMap('setMapStyle', mapStyle); }, [mapStyle]);
   const toggleTheme = () => { const nt = theme === 'dark' ? 'light' : 'dark'; setThemeState(nt); AsyncStorage.setItem('theme', nt); };
@@ -616,6 +671,14 @@ export default function App() {
     window.addEventListener('message', h);
     return () => window.removeEventListener('message', h);
   });
+  // WEB: font ikon (@expo/vector-icons) nie ładuje się pod baseUrl → wstrzyknij @font-face z CDN (ten sam plik = zgodne glify)
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof document === 'undefined' || document.getElementById('velo-iconfont')) return;
+    const st = document.createElement('style');
+    st.id = 'velo-iconfont';
+    st.textContent = "@font-face{font-family:'Ionicons';font-display:swap;src:url('https://unpkg.com/@expo/vector-icons@15.1.1/build/vendor/react-native-vector-icons/Fonts/Ionicons.ttf') format('truetype')}";
+    document.head.appendChild(st);
+  }, []);
 
   const [navReturn, setNavReturn] = useState<'tab' | 'generate'>('tab'); // dokąd wraca „wstecz" z detalu/planera
   const openDetail = (r: any, ret: 'tab' | 'generate' = 'tab') => {
@@ -643,14 +706,14 @@ export default function App() {
     callMap('setWaypoints', JSON.stringify(planPts));
     if (planPts.length < 2) { setPlanRoute(null); callMap('setPlanRoute', JSON.stringify([])); return; }
     let cancelled = false; setPlanLoading(true);
-    routeThrough(planPts, planProfile).then((res) => {
+    routeThrough(planPts, prefProfile(activity, planPrefs)).then((res) => {
       if (cancelled) return;
       setPlanLoading(false); setPlanRoute(res);
       setNearby([]); // geometria się zmieniła → odśwież sugestie POI przy następnym otwarciu
       callMap('setPlanRoute', JSON.stringify(res ? res.coords : []));
     });
     return () => { cancelled = true; };
-  }, [planPts, planProfile]);
+  }, [planPts, planPrefs, activity]);
 
   const planUndo = () => setPlanPts((p) => p.slice(0, -1));
   const planClear = () => { setPlanPts([]); setPlanRoute(null); setNearby([]); setAddedPois([]); setNearbyOpen(false); callMap('clearPlan'); };
@@ -995,7 +1058,7 @@ export default function App() {
       {screen === 'tab' && tab === 'dashboard' && <Dashboard C={C} s={s} activity={activity} onSetActivity={setActivity} onOpen={openDetail} saved={savedRoutes} favs={favs} onFav={toggleFav} onPlan={goPlan} onGenerate={enterGenerator} onRoutes={() => goTab('routes')} refreshing={refreshing} onRefresh={onRefresh} riding={riding} rideName={route?.name} onResume={resumeRide} rideProgress={riding ? { inMemory: !!ride.current, done: ride.current ? hud.done : (pendingResume?.progress?.distM || 0), total: ride.current ? hud.total : (route?.distance || 0) * 1000, elapsed: ride.current ? hud.elapsed : (pendingResume?.progress?.elapsedSec || 0), nextName: hud.nextName, nextDist: hud.nextDist, activity: route?.activity || 'bike', game: !!route?.game } : null} />}
       {screen === 'tab' && tab === 'routes' && <RoutesList C={C} s={s} activity={activity} onOpen={openDetail} saved={savedRoutes} onDeleteSaved={deleteSaved} refreshing={refreshing} onRefresh={onRefresh} onPlan={goPlan} favs={favs} onFav={toggleFav} userLoc={userLoc} />}
       {screen === 'tab' && tab === 'profile' && <Profile C={C} s={s} theme={theme} onToggleTheme={toggleTheme} onStyle={() => setStyleOpen(true)} saved={savedRoutes} activity={activity} onSetActivity={setActivity} quizState={quizState} rideStats={rideStats} history={history} voiceOn={voiceOn} onToggleVoice={toggleVoice} />}
-      {screen === 'plan' && !nearbyOpen && <PlanScreen C={C} s={s} activity={activity} pts={planPts} profile={planProfile} setProfile={setPlanProfile} planRoute={planRoute} loading={planLoading} onUndo={planUndo} onClear={planClear} onSave={planSave} onRide={planRideNow} onLayers={() => setStyleOpen(true)} onFit={() => callMap('fitPlan')} onBack={planBack} addedPois={addedPois} onOpenNearby={openNearby} />}
+      {screen === 'plan' && !nearbyOpen && <PlanScreen C={C} s={s} activity={activity} pts={planPts} prefs={planPrefs} setPrefs={setPlanPrefs} planRoute={planRoute} loading={planLoading} onUndo={planUndo} onClear={planClear} onSave={planSave} onRide={planRideNow} onLayers={() => setStyleOpen(true)} onFit={() => callMap('fitPlan')} onBack={planBack} addedPois={addedPois} onOpenNearby={openNearby} />}
       {screen === 'plan' && nearbyOpen && <NearbyExplore C={C} s={s} nearby={nearby} nearbyRadius={nearbyRadius} setNearbyRadius={setNearbyRadius} typeHidden={typeHidden} setTypeHidden={setTypeHidden} addedPois={addedPois} onTogglePoi={togglePoi} onOpenPoi={setSheet} onSave={saveNearby} onCancel={cancelNearby} onHighlight={(p: any) => callMap('highlightPoi', p.lat, p.lon)} loading={nearbyLoading} tapIdx={nearbyTap} />}
 
       {screen === 'summary' && <SummaryScreen C={C} s={s} data={summary} onClose={() => { setSummary(null); goTab('dashboard'); }} onProfile={() => { setSummary(null); goTab('profile'); }} />}
@@ -1346,13 +1409,12 @@ function RoutesList({ C, s, activity, onOpen, saved, onDeleteSaved, refreshing, 
 }
 
 /* ---------- Plan ---------- */
-function PlanScreen({ C, s, activity, pts, profile, setProfile, planRoute, loading, onUndo, onClear, onSave, onRide, onLayers, onFit, onBack, addedPois, onOpenNearby }: any) {
-  const PROFS = activity === 'walk'
-    ? [{ k: 'spacerowa', l: 'Spacerowa' }, { k: 'szlak', l: 'Szlak / górski' }, { k: 'krotka', l: 'Najkrótsza' }]
-    : [{ k: 'rowerowa', l: 'Rowerowa' }, { k: 'spokojna', l: 'Spokojna' }, { k: 'gorska', l: 'Górska / MTB' }, { k: 'szutrowa', l: 'Szutrowa' }, { k: 'szybka', l: 'Najszybsza' }, { k: 'krotka', l: 'Najkrótsza' }];
+function PlanScreen({ C, s, activity, pts, prefs, setPrefs, planRoute, loading, onUndo, onClear, onSave, onRide, onLayers, onFit, onBack, addedPois, onOpenNearby }: any) {
   const W = Dimensions.get('window').width - 60;
   const [helpOpen, setHelpOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [prefsOpen, setPrefsOpen] = useState(false);
+  const selCount = Object.keys(prefs || {}).length;
   return (
     <>
       <View style={s.planTop}>
@@ -1363,16 +1425,12 @@ function PlanScreen({ C, s, activity, pts, profile, setProfile, planRoute, loadi
           <TouchableOpacity onPress={() => setHelpOpen((o) => !o)} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}><Ionicons name="information-circle-outline" size={22} color={C.dim} /></TouchableOpacity>
         </View>
         {helpOpen && <Text style={[s.sub, { marginTop: 8 }]}>Dotknij mapy = dodaj punkt · przeciągnij = przesuń · przytrzymaj = usuń</Text>}
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 12 }} contentContainerStyle={{ gap: 8, paddingRight: 6 }}>
-          {PROFS.map((p) => {
-            const on = profile === p.k;
-            return (
-              <TouchableOpacity key={p.k} activeOpacity={0.8} style={[s.modePill, on && s.modePillOn]} onPress={() => setProfile(p.k)}>
-                <Text style={[s.modePillTxt, on && s.modePillTxtOn]}>{p.l}</Text>
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
+        <TouchableOpacity style={s.detailsToggle} activeOpacity={0.7} onPress={() => setPrefsOpen((o) => !o)}>
+          <Ionicons name="options-outline" size={16} color={C.accent} />
+          <Text style={s.detailsToggleTxt}>Charakter trasy{selCount ? ` (${selCount})` : ''}</Text>
+          <Ionicons name={prefsOpen ? 'chevron-up' : 'chevron-down'} size={16} color={C.dim} />
+        </TouchableOpacity>
+        {prefsOpen && <ScrollView style={{ maxHeight: 230, marginTop: 4 }} nestedScrollEnabled showsVerticalScrollIndicator={false}><WeightedPrefs C={C} s={s} prefs={prefs || {}} onChange={setPrefs} options={genPrefsFor(activity)} /></ScrollView>}
       </View>
 
       <TouchableOpacity style={[s.fitBtn, { top: 198 }]} activeOpacity={0.8} onPress={onFit}>
@@ -2146,9 +2204,51 @@ function GenBrowser({ C, s, routes, onClose, onBack, onSave, onPreview, onEdit, 
   );
 }
 
+// Suwak 0-100 (PanResponder — działa na telefonie i w PWA)
+function Slider({ C, s, value, onChange }: any) {
+  const wRef = useRef(0);
+  const setX = (x: number) => { const w = wRef.current || 1; onChange(Math.max(0, Math.min(100, Math.round((x / w) * 100)))); };
+  const pan = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onPanResponderGrant: (e: any) => setX(e.nativeEvent.locationX),
+    onPanResponderMove: (e: any) => setX(e.nativeEvent.locationX),
+  })).current;
+  return (
+    <View onLayout={(e) => { wRef.current = e.nativeEvent.layout.width; }} {...pan.panHandlers} style={s.sliderWrap}>
+      <View style={s.sliderTrack}><View style={[s.sliderFill, { width: (value + '%') as any }]} /></View>
+      <View style={[s.sliderThumb, { left: (value + '%') as any }]} />
+    </View>
+  );
+}
+// Multi-select pillsy + suwaki % („co jest dla mnie ważne") — wspólne dla generatora i planera
+function WeightedPrefs({ C, s, prefs, onChange, options }: any) {
+  const total = (Object.values(prefs) as number[]).reduce((a, b) => a + (b || 0), 0) || 1;
+  const toggle = (k: string) => { const np = { ...prefs }; if (k in np) delete np[k]; else np[k] = 50; onChange(np); };
+  const sel = options.filter((o: any) => o.key in prefs);
+  return (
+    <View>
+      <View style={s.genChipRow}>
+        {options.map((o: any) => { const on = o.key in prefs; return (
+          <TouchableOpacity key={o.key} style={[s.genThemeChip, on && s.genThemeChipOn]} activeOpacity={0.8} onPress={() => toggle(o.key)}>
+            <Ionicons name={o.ion} size={15} color={on ? C.bg : C.txt} /><Text style={[s.genThemeTxt, on && { color: C.bg }]}>{o.label}</Text>
+          </TouchableOpacity>
+        ); })}
+      </View>
+      {sel.length > 0 && <Text style={[s.sub, { fontSize: 12, marginTop: 12 }]}>Jak ważne (przeciągnij; % to udział):</Text>}
+      {sel.map((o: any) => (
+        <View key={o.key} style={s.prefRow}>
+          <Text style={s.prefLabel} numberOfLines={1}>{o.label}</Text>
+          <View style={{ flex: 1 }}><Slider C={C} s={s} value={prefs[o.key]} onChange={(v: number) => onChange({ ...prefs, [o.key]: v })} /></View>
+          <Text style={s.prefPct}>{Math.round((prefs[o.key] / total) * 100)}%</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
 function GeneratorScreen({ C, s, step, area, radius, setRadius, cfg, setCfg, loading, results, onNext, onGenerate, onBack, onClose, onSave, onPreview, onEdit, onFocus, onOpenPoi }: any) {
   const up = (patch: any) => setCfg((c: any) => ({ ...c, ...patch }));
-  const toggleTheme = (k: string) => setCfg((c: any) => ({ ...c, themes: c.themes.includes(k) ? c.themes.filter((x: string) => x !== k) : [...c.themes, k] }));
   const Pill = ({ on, label, onPress }: any) => (<TouchableOpacity style={[s.modePill, on && s.modePillOn]} activeOpacity={0.8} onPress={onPress}><Text style={[s.modePillTxt, on && s.modePillTxtOn]}>{label}</Text></TouchableOpacity>);
 
   if (step === 'area') {
@@ -2181,31 +2281,20 @@ function GeneratorScreen({ C, s, step, area, radius, setRadius, cfg, setCfg, loa
         <ScrollView contentContainerStyle={{ padding: 18, paddingBottom: 110 }} showsVerticalScrollIndicator={false}>
           <Text style={[s.groupLabel, { marginTop: 0 }]}>Aktywność</Text>
           <View style={s.segment}>
-            <TouchableOpacity style={[s.segBtn, cfg.activity === 'bike' && s.segBtnOn]} activeOpacity={0.85} onPress={() => up({ activity: 'bike' })}><Ionicons name="bicycle" size={18} color={cfg.activity === 'bike' ? C.bg : C.txt} /><Text style={[s.segTxt, cfg.activity === 'bike' && s.segTxtOn]}>Rower</Text></TouchableOpacity>
-            <TouchableOpacity style={[s.segBtn, cfg.activity === 'walk' && s.segBtnOn]} activeOpacity={0.85} onPress={() => up({ activity: 'walk' })}><Ionicons name="walk" size={18} color={cfg.activity === 'walk' ? C.bg : C.txt} /><Text style={[s.segTxt, cfg.activity === 'walk' && s.segTxtOn]}>Spacer</Text></TouchableOpacity>
+            <TouchableOpacity style={[s.segBtn, cfg.activity === 'bike' && s.segBtnOn]} activeOpacity={0.85} onPress={() => up({ activity: 'bike', prefs: { cyclepath: 60, scenery: 40 } })}><Ionicons name="bicycle" size={18} color={cfg.activity === 'bike' ? C.bg : C.txt} /><Text style={[s.segTxt, cfg.activity === 'bike' && s.segTxtOn]}>Rower</Text></TouchableOpacity>
+            <TouchableOpacity style={[s.segBtn, cfg.activity === 'walk' && s.segBtnOn]} activeOpacity={0.85} onPress={() => up({ activity: 'walk', prefs: { trails: 60, scenery: 40 } })}><Ionicons name="walk" size={18} color={cfg.activity === 'walk' ? C.bg : C.txt} /><Text style={[s.segTxt, cfg.activity === 'walk' && s.segTxtOn]}>Spacer</Text></TouchableOpacity>
           </View>
 
           <Text style={s.groupLabel}>Długość ({cfg.activity === 'walk' ? 'spacer' : 'trasa'})</Text>
           <View style={s.genChipRow}>{[3, 5, 8, 12].map((l) => <Pill key={l} on={cfg.lengthKm === l} label={l + ' km'} onPress={() => up({ lengthKm: l })} />)}</View>
 
-          {cfg.activity === 'bike' && <>
-            <Text style={s.groupLabel}>Nawierzchnia / charakter</Text>
-            <View style={s.genChipRow}>{[['cyclepath', 'Ścieżki rowerowe'], ['gravel', 'Szutry'], ['fast', 'Najszybsza']].map(([k, l]) => <Pill key={k} on={cfg.bikeStyle === k} label={l} onPress={() => up({ bikeStyle: k })} />)}</View>
-          </>}
+          <Text style={s.groupLabel}>Co jest dla Ciebie ważne? (wybierz kilka)</Text>
+          <WeightedPrefs C={C} s={s} prefs={cfg.prefs || {}} onChange={(p: any) => up({ prefs: p })} options={genPrefsFor(cfg.activity)} />
 
           <Text style={s.groupLabel}>Kształt</Text>
           <View style={s.genChipRow}>{[['loop', 'Pętla (wróć do startu)'], ['oneway', 'W jedną stronę']].map(([k, l]) => <Pill key={k} on={cfg.shape === k} label={l} onPress={() => up({ shape: k })} />)}</View>
 
           <Text style={s.groupLabel}>Dodatkowo</Text>
-          {cfg.activity === 'walk' && (
-            <View style={s.settingRow}>
-              <View style={{ flex: 1, paddingRight: 12 }}>
-                <Text style={s.settingTxt}>Preferuj ścieżki i szlaki</Text>
-                <Text style={[s.sub, { fontSize: 12, marginTop: 2 }]}>leśne ścieżki, przejścia, mniej ulic</Text>
-              </View>
-              <Switch value={cfg.trails} onValueChange={(v) => up({ trails: v })} trackColor={{ true: C.accent, false: C.stroke }} />
-            </View>
-          )}
           <View style={s.settingRow}><Text style={s.settingTxt}>Tryb gry terenowej (quizy)</Text><Switch value={cfg.game} onValueChange={(v) => up({ game: v })} trackColor={{ true: C.accent, false: C.stroke }} /></View>
           <View style={s.settingRow}><Text style={s.settingTxt}>Meta w kawiarni</Text><Switch value={cfg.endCafe} onValueChange={(v) => up({ endCafe: v })} trackColor={{ true: C.accent, false: C.stroke }} /></View>
         </ScrollView>
@@ -2360,6 +2449,13 @@ function makeStyles(C: C) {
     genThemeChip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 13, paddingVertical: 9, borderRadius: 999, backgroundColor: C.surface, borderWidth: 1.5, borderColor: C.stroke },
     genThemeChipOn: { backgroundColor: C.txt, borderColor: C.txt },
     genThemeTxt: { color: C.txt, fontSize: 13, fontWeight: '700' },
+    sliderWrap: { height: 30, justifyContent: 'center' },
+    sliderTrack: { height: 6, borderRadius: 3, backgroundColor: C.stroke, overflow: 'hidden' },
+    sliderFill: { height: 6, backgroundColor: C.accent, borderRadius: 3 },
+    sliderThumb: { position: 'absolute', top: 6, marginLeft: -9, width: 18, height: 18, borderRadius: 9, backgroundColor: C.txt, borderWidth: 2, borderColor: C.bg },
+    prefRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 8 },
+    prefLabel: { color: C.txt, fontSize: 13, fontWeight: '600', width: 108 },
+    prefPct: { color: C.accent, fontSize: 13, fontWeight: '800', width: 42, textAlign: 'right' },
     genPanel: { flex: 1, backgroundColor: C.bg },
     genHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingTop: 60, paddingHorizontal: 18, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: C.stroke },
     genHeaderT: { color: C.txt, fontSize: 18, fontWeight: '800', letterSpacing: -0.3 },
