@@ -288,6 +288,65 @@ async function routeThrough(pts: number[][], profileKey: string): Promise<any> {
   const url = `https://brouter.de/brouter?lonlats=${lonlats}&profile=${profile}&alternativeidx=0&format=geojson`;
   try { return parseBRouter(await (await fetchT(url, {}, 15000)).json()); } catch { return null; }
 }
+// ===== Kolorowanie trasy na mapie (typ drogi / wzniesienia) =====
+// łączy kolejne współrzędne o tym samym kolorze w odcinki [{pts,color}] (sąsiednie odcinki dzielą punkt → linia ciągła)
+function buildRuns(coords: number[][], colorOf: (i: number) => string): any[] {
+  const runs: any[] = []; let cur: string | null = null; let pts: number[][] = [];
+  for (let i = 0; i < coords.length; i++) {
+    const col = colorOf(i);
+    if (col !== cur) { if (pts.length > 1) runs.push({ pts, color: cur }); pts = i > 0 ? [coords[i - 1], coords[i]] : [coords[i]]; cur = col; }
+    else pts.push(coords[i]);
+  }
+  if (pts.length > 1) runs.push({ pts, color: cur });
+  return runs;
+}
+function hwColor(hw: string): string {
+  if (hw === 'cycleway') return WAYTYPE_COL['Ścieżka rowerowa'];
+  if (['path', 'footway', 'track', 'bridleway', 'steps'].includes(hw)) return WAYTYPE_COL['Ścieżka / szlak'];
+  if (['residential', 'living_street', 'service', 'unclassified', 'pedestrian'].includes(hw)) return WAYTYPE_COL['Ulica'];
+  if (['primary', 'secondary', 'tertiary', 'trunk', 'road', 'primary_link', 'secondary_link', 'tertiary_link'].includes(hw)) return WAYTYPE_COL['Droga'];
+  return WAYTYPE_COL['Inne'];
+}
+const ELEV_RAMP = ['#2bb673', '#7bd34a', '#f5c423', '#f0852b', '#e23b3b']; // nisko → wysoko
+function elevationRuns(path: number[][], eles: number[]): any[] | null {
+  if (!path || path.length < 2 || !eles || eles.length < 2) return null;
+  let mn = Infinity, mx = -Infinity;
+  for (const e of eles) { if (e < mn) mn = e; if (e > mx) mx = e; }
+  const span = Math.max(1, mx - mn);
+  const eleAt = (i: number) => eles[Math.min(eles.length - 1, Math.floor((i / path.length) * eles.length))];
+  return buildRuns(path, (i) => ELEV_RAMP[Math.min(ELEV_RAMP.length - 1, Math.floor(((eleAt(i) - mn) / span) * ELEV_RAMP.length))]);
+}
+// nawierzchnia per-odcinek: trasy zapisują tylko zagregowane surfaces, więc liczymy na żądanie —
+// re-routing przez gęste punkty z istniejącej ścieżki daje messages (typ drogi) zmapowane na geometrię. Cache w pamięci.
+async function surfaceRunsFor(route: any): Promise<any[] | null> {
+  if (route._surfRuns !== undefined) return route._surfRuns;
+  const path = route.path;
+  if (!path || path.length < 2) { route._surfRuns = null; return null; }
+  const wpts = sampleArr(path, 25);
+  const lonlats = wpts.map((p: number[]) => `${p[1]},${p[0]}`).join('|');
+  const url = `https://brouter.de/brouter?lonlats=${lonlats}&profile=trekking&alternativeidx=0&format=geojson`;
+  try {
+    const j: any = await (await fetchT(url, {}, 15000)).json();
+    const f = j?.features?.[0]; const c = f?.geometry?.coordinates; const msgs = f?.properties?.messages;
+    if (!c || c.length < 2 || !msgs || msgs.length < 2) { route._surfRuns = null; return null; }
+    const coords = c.map((x: number[]) => [x[1], x[0]]);
+    const head = msgs[0]; const di = head.indexOf('Distance'); const wi = head.indexOf('WayTags');
+    if (di < 0 || wi < 0) { route._surfRuns = null; return null; }
+    const bounds: { end: number; color: string }[] = []; let acc = 0;
+    for (let r = 1; r < msgs.length; r++) {
+      const dist = +msgs[r][di] || 0;
+      const hw = ((msgs[r][wi] || '').match(/highway=([\w_]+)/) || [])[1] || '';
+      acc += dist; bounds.push({ end: acc, color: hwColor(hw) });
+    }
+    const cumO = [0]; for (let i = 1; i < coords.length; i++) cumO[i] = cumO[i - 1] + hav(coords[i - 1], coords[i]);
+    const total = cumO[coords.length - 1] || 1; const btotal = acc || 1;
+    let bi = 0;
+    const colorOf = (i: number) => { const d = (cumO[i] / total) * btotal; while (bi < bounds.length - 1 && d > bounds[bi].end) bi++; return bounds[bi].color; };
+    const runs = buildRuns(coords, colorOf);
+    route._surfRuns = runs.length ? runs : null;
+    return route._surfRuns;
+  } catch { route._surfRuns = null; return null; }
+}
 // Miejsca w pobliżu zaplanowanej trasy (Overpass: atrakcje/zabytki/restauracje/parkingi)
 async function fetchNearbyPlaces(coords: number[][], activity: string): Promise<any[]> {
   if (!coords || coords.length < 2) return [];
@@ -957,6 +1016,22 @@ export default function App() {
     } catch {}
   };
 
+  // malowanie trasy na mapie: 'plain' | 'surf' (typ drogi) | 'elev' (wzniesienia). zwraca false, gdy brak danych
+  const applyRoutePaint = async (r: any, mode: string, eles?: number[]): Promise<boolean> => {
+    if (mode === 'surf') {
+      const runs = await surfaceRunsFor(r);
+      callMap('paintRoute', JSON.stringify({ runs: runs || [], color: r.color, plain: !runs }));
+      return !!(runs && runs.length);
+    }
+    if (mode === 'elev') {
+      const runs = elevationRuns(r.path, eles || r.eles);
+      callMap('paintRoute', JSON.stringify({ runs: runs || [], color: r.color, plain: !runs }));
+      return !!(runs && runs.length);
+    }
+    callMap('paintRoute', JSON.stringify({ plain: true, color: r.color }));
+    return true;
+  };
+
   /* ---- Generator tras ---- */
   const enterGenerator = () => { setGenStep('area'); setGenAreaState(null); setGenResults([]); setGenCfg((c: any) => ({ ...c, activity })); setScreen('generate'); setTimeout(() => { callMap('clearAll'); callMap('setGenPick', true); }, 60); };
   const exitGenerator = () => { callMap('setGenPick', false); callMap('clearGen'); setScreen('tab'); setTab('dashboard'); };
@@ -1045,7 +1120,7 @@ export default function App() {
           : <WebView ref={webRef} originWhitelist={['*']} source={{ html: MAP_HTML }} onMessage={onMessage} style={{ backgroundColor: C.bg }} scrollEnabled={false} />}
       </View>
 
-      {screen === 'detail' && <DetailScreen C={C} s={s} route={route} onBack={detailBack} onPoi={setSheet} onStart={startRide} onLayers={() => setStyleOpen(true)} callMapFit={(b: number) => callMap('fitRoutePadded', b)} onFocusPoi={(la: number, lo: number) => callMap('focusPoi', la, lo)} onRename={openRename} onEdit={editSaved} onThumb={openThumb} />}
+      {screen === 'detail' && <DetailScreen C={C} s={s} route={route} onBack={detailBack} onPoi={setSheet} onStart={startRide} onLayers={() => setStyleOpen(true)} callMapFit={(b: number) => callMap('fitRoutePadded', b)} onFocusPoi={(la: number, lo: number) => callMap('focusPoi', la, lo)} onRename={openRename} onEdit={editSaved} onThumb={openThumb} onPaint={applyRoutePaint} />}
       {screen === 'ride' && (
         <RideOverlay C={C} s={s} phase={phase} hud={hud} mode={mode} paused={paused} activity={route?.activity || 'bike'}
           variants={variants} variantKey={variantKey} onSelectVariant={selectVariant}
@@ -1861,7 +1936,7 @@ function NearbyExplore({ C, s, nearby, nearbyRadius, setNearbyRadius, typeHidden
   );
 }
 
-function DetailScreen({ C, s, route, onBack, onPoi, onStart, onLayers, callMapFit, onFocusPoi, onRename, onEdit, onThumb }: any) {
+function DetailScreen({ C, s, route, onBack, onPoi, onStart, onLayers, callMapFit, onFocusPoi, onRename, onEdit, onThumb, onPaint }: any) {
   const editable = /^(my|gen)/.test(String(route.id || ''));
   const canThumb = /^my/.test(String(route.id || ''));
   const cum = cumDist(route.path);
@@ -1901,6 +1976,23 @@ function DetailScreen({ C, s, route, onBack, onPoi, onStart, onLayers, callMapFi
     let c = false; fetchElevation(route.path).then((e) => { if (!c) setElev(e); }); return () => { c = true; };
   }, [route.id]);
   const chartW = Dimensions.get('window').width - 40;
+  const [paint, setPaint] = useState('plain');
+  const [paintBusy, setPaintBusy] = useState(false);
+  useEffect(() => { setPaint('plain'); }, [route.id]); // nowa trasa → reset do zwykłej linii (mapę rysuje setRoute)
+  const changePaint = async (mode: string) => {
+    if (paintBusy) return;
+    if (mode === paint) mode = 'plain'; // ponowny tap = wyłącz
+    setPaint(mode);
+    if (mode === 'surf') {
+      setPaintBusy(true);
+      const ok = await onPaint(route, 'surf');
+      setPaintBusy(false);
+      if (!ok) { setPaint('plain'); }
+    } else {
+      onPaint(route, mode, elev?.eles);
+    }
+  };
+  const PAINTS = [{ k: 'surf', l: 'Typ drogi', ic: 'git-branch-outline' }, { k: 'elev', l: 'Wzniesienia', ic: 'trending-up-outline' }];
   return (
     <>
       {!exploring && <TouchableOpacity style={s.back} onPress={onBack}><Ionicons name="chevron-back" size={24} color={C.txt} /></TouchableOpacity>}
@@ -1954,6 +2046,18 @@ function DetailScreen({ C, s, route, onBack, onPoi, onStart, onLayers, callMapFi
 
           <Text style={s.sectionT}>{(route.activity || 'bike') === 'walk' ? 'Trasa' : 'Profil trasy'}</Text>
           <View style={{ paddingHorizontal: 20 }}>
+            <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
+              {PAINTS.map((p) => {
+                const on = paint === p.k;
+                const busy = paintBusy && p.k === 'surf';
+                return (
+                  <TouchableOpacity key={p.k} activeOpacity={0.8} style={[s.modePill, { flexDirection: 'row', alignItems: 'center', gap: 6 }, on && s.modePillOn]} onPress={() => changePaint(p.k)}>
+                    {busy ? <ActivityIndicator size="small" color={on ? C.bg : C.txt} /> : <Ionicons name={p.ic as any} size={15} color={on ? C.bg : C.dim} />}
+                    <Text style={[s.modePillTxt, on && s.modePillTxtOn]}>{p.l}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
             <RouteStats s={s} distM={route.distance * 1000} timeMin={route.timeMin} ascent={elev?.ascent} descent={elev?.descent} showElevation={(route.activity || 'bike') !== 'walk'} />
             {(route.activity || 'bike') !== 'walk' && (elev?.eles ? <ElevationChart C={C} eles={elev.eles} width={chartW} /> : <Text style={[s.sub, { paddingVertical: 8 }]}>Ładowanie profilu wysokości…</Text>)}
             <SurfaceBars s={s} surfaces={route.surfaces} />

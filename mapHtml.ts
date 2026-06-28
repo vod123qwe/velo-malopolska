@@ -14,6 +14,7 @@ export const MAP_HTML = `<!DOCTYPE html>
   .pin{filter:drop-shadow(0 2px 4px rgba(0,0,0,.6));font-size:26px;line-height:1;}
   .poipill{width:30px;height:30px;border-radius:50%;background:#fff;display:flex;align-items:center;
       justify-content:center;box-shadow:0 2px 7px rgba(0,0,0,.35);}
+  .endpin{filter:drop-shadow(0 2px 5px rgba(0,0,0,.5));}
   .me-wrap{position:relative;width:48px;height:48px;}
   .me-rot{position:absolute;left:0;top:0;width:48px;height:48px;display:none;transition:transform .15s linear;}
   .me-cone{position:absolute;left:50%;bottom:50%;width:42px;height:26px;margin-left:-21px;
@@ -57,6 +58,18 @@ export const MAP_HTML = `<!DOCTYPE html>
   window.setMapStyle=function(k){ curStyle=k; applyTiles(); };
 
   var routeLine=null, poiMarkers=[], meMarker=null, doneLine=null, approachLine=null, headingDeg=null;
+  var startMarker=null, endMarker=null, paintLayers=[], curRoutePath=null;
+  function endIcon(kind){
+    var isStart = kind==='start';
+    var col = isStart ? '#34d07f' : '#ff5a5f';
+    var glyph = isStart
+      ? '<path d="M9 7.5l5 3.5-5 3.5z" fill="#fff" stroke="none"/>'  // play
+      : '<path d="M8 6v9" stroke="#fff" stroke-width="1.6"/><path d="M8 6.4h6.2l-1.4 2 1.4 2H8z" fill="#fff" stroke="none"/>'; // flag
+    var svg='<svg viewBox="0 0 22 22" width="34" height="34">'
+      +'<circle cx="11" cy="11" r="10" fill="'+col+'" stroke="#fff" stroke-width="2"/>'+glyph+'</svg>';
+    return L.divIcon({className:'',html:'<div class="endpin">'+svg+'</div>',iconSize:[34,34],iconAnchor:[17,17]});
+  }
+  function clearPaint(){ paintLayers.forEach(function(l){map.removeLayer(l);}); paintLayers=[]; }
   function send(o){ var s=JSON.stringify(o); if(window.ReactNativeWebView) window.ReactNativeWebView.postMessage(s); else if(window.parent && window.parent!==window) window.parent.postMessage(s,'*'); }
   // WEB (iframe): odbiór komend z aplikacji jako {__cmd, args} → wywołanie window[fn](...args)
   window.addEventListener('message', function(e){ try{ var d = typeof e.data==='string'? JSON.parse(e.data): e.data; if(d && d.__cmd && typeof window[d.__cmd]==='function') window[d.__cmd].apply(null, d.args||[]); }catch(err){} });
@@ -83,15 +96,35 @@ export const MAP_HTML = `<!DOCTYPE html>
   window.setRoute=function(json){
     var r=JSON.parse(json);
     if(routeLine) map.removeLayer(routeLine);
+    clearPaint();
     poiMarkers.forEach(function(m){map.removeLayer(m);}); poiMarkers=[];
+    if(startMarker){map.removeLayer(startMarker);startMarker=null;}
+    if(endMarker){map.removeLayer(endMarker);endMarker=null;}
     if(doneLine){map.removeLayer(doneLine);doneLine=null;}
+    curRoutePath=r.path;
     routeLine=L.polyline(r.path,{color:r.color||'#34d07f',weight:6,opacity:.85}).addTo(map);
     r.pois.forEach(function(p,i){
       var m=L.marker([p.lat,p.lon],{icon:poiIcon(p.kind)}).addTo(map);
       m.on('click',function(){send({type:'poi',idx:i});});
       poiMarkers.push(m);
     });
+    if(r.path && r.path.length>1){
+      startMarker=L.marker(r.path[0],{icon:endIcon('start'),zIndexOffset:900}).addTo(map);
+      endMarker=L.marker(r.path[r.path.length-1],{icon:endIcon('end'),zIndexOffset:900}).addTo(map);
+    }
     map.fitBounds(routeLine.getBounds().pad(0.18));
+  };
+  // przemaluj trasę wg podanych odcinków [{pts:[[lat,lon]..],color}] albo plain (jeden kolor)
+  window.paintRoute=function(json){
+    var o=JSON.parse(json); clearPaint();
+    if(routeLine){ map.removeLayer(routeLine); routeLine=null; }
+    if(o.plain || !o.runs || !o.runs.length){
+      routeLine=L.polyline(curRoutePath||[],{color:(o&&o.color)||'#34d07f',weight:6,opacity:.85}).addTo(map);
+      return;
+    }
+    o.runs.forEach(function(run){
+      if(run.pts && run.pts.length>1) paintLayers.push(L.polyline(run.pts,{color:run.color,weight:6,opacity:.95,lineCap:'round'}).addTo(map));
+    });
   };
 
   window.startRideView=function(json){
