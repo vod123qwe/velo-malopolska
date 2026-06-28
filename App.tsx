@@ -460,46 +460,51 @@ function poiThemeOf(t: any, kind: string): string {
   if (t.tourism === 'artwork' || t.amenity === 'theatre' || t.amenity === 'arts_centre') return 'sztuka';
   return 'atrakcje';
 }
-// Ważone preferencje („co dla mnie ważne") — multi-select + suwaki %
-const GEN_PREFS_BIKE = [
+// === Preferencje trasy: TRZY osobne grupy (tryb drogi / co zobaczyć / trudność) ===
+// 1) Tryb drogi — POJEDYNCZY wybór; steruje profilem routingu BRouter (jak połączyć punkty)
+const ROAD_BIKE = [
   { key: 'cyclepath', label: 'Ścieżki rowerowe', ion: 'bicycle-outline' },
-  { key: 'gravel', label: 'Szutry / off-road', ion: 'trail-sign-outline' },
-  { key: 'fast', label: 'Asfalt / szybko', ion: 'flash-outline' },
-  { key: 'flat', label: 'Bez wzniesień', ion: 'remove-outline' },
-  { key: 'scenery', label: 'Widoki i natura', ion: 'leaf-outline' },
-  { key: 'culture', label: 'Zabytki i historia', ion: 'business-outline' },
-  { key: 'food', label: 'Kawiarnie po drodze', ion: 'cafe-outline' },
+  { key: 'gravel', label: 'Szutrowa', ion: 'trail-sign-outline' },
+  { key: 'fast', label: 'Asfaltowa', ion: 'flash-outline' },
   { key: 'quiet', label: 'Mało ruchu', ion: 'shield-checkmark-outline' },
+  { key: 'mtb', label: 'Górska / MTB', ion: 'trail-sign' },
+  { key: 'short', label: 'Najkrótsza', ion: 'resize-outline' },
 ];
-const GEN_PREFS_WALK = [
+const ROAD_WALK = [
   { key: 'trails', label: 'Ścieżki i szlaki', ion: 'trail-sign-outline' },
-  { key: 'flat', label: 'Bez wzniesień', ion: 'remove-outline' },
-  { key: 'scenery', label: 'Widoki i natura', ion: 'leaf-outline' },
-  { key: 'culture', label: 'Zabytki i historia', ion: 'business-outline' },
-  { key: 'food', label: 'Kawiarnie po drodze', ion: 'cafe-outline' },
+  { key: 'calm', label: 'Chodniki / spokojnie', ion: 'walk-outline' },
+  { key: 'short', label: 'Najkrótsza', ion: 'resize-outline' },
 ];
-const genPrefsFor = (activity: string) => (activity === 'walk' ? GEN_PREFS_WALK : GEN_PREFS_BIKE);
-// najwyżej ważona nawierzchnia → profil routingu BRouter
+const roadOptsFor = (activity: string) => (activity === 'walk' ? ROAD_WALK : ROAD_BIKE);
+// 2) Co zobaczyć po drodze — WIELOKROTNY wybór; w generatorze wplata POI + ranguje, w planerze filtruje sugestie „Punkty w pobliżu"
+const THEME_OPTS = [
+  { key: 'history', label: 'Zabytki', ion: 'business-outline' },
+  { key: 'nature', label: 'Natura', ion: 'leaf-outline' },
+  { key: 'food', label: 'Jedzenie', ion: 'cafe-outline' },
+  { key: 'attractions', label: 'Atrakcje', ion: 'sparkles-outline' },
+];
+const THEME_TO_T: Record<string, string> = { history: 'historia', nature: 'przyroda', food: 'jedzenie', attractions: 'atrakcje' };
+// 3) Trudność / podjazdy — JEDEN suwak (0 płasko … 100 górsko)
+const DIFF_LABELS: [number, string][] = [[0, 'Płasko'], [20, 'Łatwa'], [40, 'Umiarkowana'], [60, 'Średnia'], [80, 'Wymagająca'], [100, 'Górska']];
+function diffLabel(v: number): string { let b = DIFF_LABELS[0]; for (const d of DIFF_LABELS) if (Math.abs(d[0] - (v ?? 40)) < Math.abs(b[0] - (v ?? 40))) b = d; return b[1]; }
+
+// tryb drogi → profil routingu BRouter
 function prefProfile(activity: string, prefs: any): string {
-  prefs = prefs || {};
-  if (activity === 'walk') return (prefs.trails || 0) > 0 && (prefs.trails || 0) >= (prefs.flat || 0) ? 'szlak' : 'spacerowa';
-  const surf: any = { cyclepath: prefs.cyclepath || 0, gravel: prefs.gravel || 0, fast: prefs.fast || 0, quiet: prefs.quiet || 0 };
-  let best = '', bv = 0; for (const k in surf) if (surf[k] > bv) { bv = surf[k]; best = k; }
-  if (best === 'gravel') return 'szutrowa';
-  if (best === 'fast') return 'szybka';
-  return 'rowerowa'; // cyclepath / quiet / brak → safety (Velo)
+  const r = (prefs || {}).road;
+  if (activity === 'walk') { if (r === 'calm') return 'spacerowa'; if (r === 'short') return 'krotka'; return 'szlak'; }
+  switch (r) { case 'gravel': return 'szutrowa'; case 'fast': return 'szybka'; case 'quiet': return 'spokojna'; case 'mtb': return 'gorska'; case 'short': return 'krotka'; default: return 'rowerowa'; }
 }
-// ranking wygenerowanych tras wg wag użytkownika
+// ranking wygenerowanych tras: dopasowanie tematów + cel trudności
 function scoreRoute(r: any, prefs: any): number {
-  const tot = Object.values(prefs || {}).reduce((a: number, b: any) => a + (b || 0), 0) || 1;
+  prefs = prefs || {};
+  const themes: string[] = prefs.themes || [];
   const pois = r.pois || []; const n = pois.length || 1;
   const cnt = (th: string) => pois.filter((p: any) => themeFromKind(p.kind) === th).length / n;
-  const flat = 1 - Math.min(1, (r.ascent || 0) / ((r.distance || 1) * 18));
   let s = 0;
-  s += ((prefs.flat || 0) / tot) * flat;
-  s += ((prefs.scenery || 0) / tot) * cnt('przyroda');
-  s += ((prefs.culture || 0) / tot) * cnt('historia');
-  s += ((prefs.food || 0) / tot) * cnt('jedzenie');
+  for (const t of themes) s += cnt(THEME_TO_T[t] || t);
+  const flat = 1 - Math.min(1, (r.ascent || 0) / ((r.distance || 1) * 18));
+  const diff = (prefs.difficulty ?? 40) / 100; // 0 = premiuj płaskie, 1 = premiuj podjazdy
+  s += (1 - diff) * flat + diff * (1 - flat);
   return s;
 }
 // Buduje jedną trasę z puli POI danej KATEGORII (nearest-neighbor od środka)
@@ -653,7 +658,7 @@ export default function App() {
   const [genStep, setGenStep] = useState<'area' | 'config' | 'results'>('area');
   const [genArea, setGenAreaState] = useState<{ lat: number; lon: number } | null>(null);
   const [genRadius, setGenRadius] = useState(1500);
-  const [genCfg, setGenCfg] = useState<any>({ activity: 'walk', lengthKm: 5, prefs: { trails: 60, scenery: 40 }, shape: 'loop', game: false, endCafe: false });
+  const [genCfg, setGenCfg] = useState<any>({ activity: 'walk', lengthKm: 5, prefs: { road: 'trails', themes: ['nature'], difficulty: 40 }, shape: 'loop', game: false, endCafe: false });
   const [genLoading, setGenLoading] = useState(false);
   const [genResults, setGenResults] = useState<any[]>([]);
   const answerQuiz = (name: string, correct: boolean) => setQuizState((prev) => {
@@ -668,7 +673,7 @@ export default function App() {
   const [activity, setActivityState] = useState<'bike' | 'walk'>('bike');
   // planowanie tras
   const [planPts, setPlanPts] = useState<number[][]>([]);
-  const [planPrefs, setPlanPrefs] = useState<any>({ cyclepath: 60, scenery: 40 });
+  const [planPrefs, setPlanPrefs] = useState<any>({ road: 'cyclepath', themes: [] });
   const [planRoute, setPlanRoute] = useState<any>(null);
   const [planLoading, setPlanLoading] = useState(false);
   const [nearby, setNearby] = useState<any[]>([]);
@@ -716,7 +721,7 @@ export default function App() {
       if (ms) setMapStyleState(ms);
       if (mr) { try { setSavedRoutes(JSON.parse(mr)); } catch {} }
       if (fv) { try { setFavs(JSON.parse(fv)); } catch {} }
-      if (ac === 'walk' || ac === 'bike') { setActivityState(ac); CURRENT_ACTIVITY = ac; setPlanPrefs(ac === 'walk' ? { trails: 60, scenery: 40 } : { cyclepath: 60, scenery: 40 }); }
+      if (ac === 'walk' || ac === 'bike') { setActivityState(ac); CURRENT_ACTIVITY = ac; setPlanPrefs(ac === 'walk' ? { road: 'trails', themes: [] } : { road: 'cyclepath', themes: [] }); }
       if (th) { try { const arr = JSON.parse(th); if (Array.isArray(arr)) setTypeHidden(arr); } catch {} }
       if (rd) { const n = +rd; if (n > 0) setNearbyRadius(n); }
       if (qz) { try { const q = JSON.parse(qz); if (q && typeof q.points === 'number' && q.done) setQuizState(q); } catch {} }
@@ -735,7 +740,7 @@ export default function App() {
   useEffect(() => { if (prefsLoaded.current) AsyncStorage.setItem('poiRadius', String(nearbyRadius)); }, [nearbyRadius]);
   useEffect(() => { if (prefsLoaded.current) AsyncStorage.setItem('quizState', JSON.stringify(quizState)); }, [quizState]);
   const toggleFav = (id: string) => { setFavs((prev) => { const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]; AsyncStorage.setItem('favRoutes', JSON.stringify(next)); return next; }); };
-  const setActivity = (a: 'bike' | 'walk') => { setActivityState(a); CURRENT_ACTIVITY = a; AsyncStorage.setItem('activityMode', a); setPlanPrefs(a === 'walk' ? { trails: 60, scenery: 40 } : { cyclepath: 60, scenery: 40 }); setPlanPts([]); setPlanRoute(null); setNearby([]); setAddedPois([]); };
+  const setActivity = (a: 'bike' | 'walk') => { setActivityState(a); CURRENT_ACTIVITY = a; AsyncStorage.setItem('activityMode', a); setPlanPrefs(a === 'walk' ? { road: 'trails', themes: [] } : { road: 'cyclepath', themes: [] }); setPlanPts([]); setPlanRoute(null); setNearby([]); setAddedPois([]); };
   useEffect(() => { if (mapReady.current) callMap('setTheme', theme); }, [theme]);
   useEffect(() => { if (mapReady.current) callMap('setMapStyle', mapStyle); }, [mapStyle]);
   const toggleTheme = () => { const nt = theme === 'dark' ? 'light' : 'dark'; setThemeState(nt); AsyncStorage.setItem('theme', nt); };
@@ -830,6 +835,9 @@ export default function App() {
   const openNearby = async () => {
     if (!planRoute) return;
     addedSnapshot.current = addedPois;
+    // „Co zobaczyć po drodze" z planera = wstępny filtr typów: pokaż tylko wybrane motywy (sklepy nadal domyślnie ukryte)
+    const th = planPrefs.themes || [];
+    if (th.length) { const wanted = new Set(th.map((k: string) => THEME_TO_T[k])); setTypeHidden(['Sklep', ...KIND_ORDER.filter((k) => k !== 'Sklep' && !wanted.has(themeFromKind(k)))]); }
     setNearbyOpen(true);
     callMap('setPlanClicks', false); // w trybie dodawania POI klik w mapę nie dodaje punktów ścieżki
     if (nearby.length === 0) { setNearbyLoading(true); const r = await fetchNearbyPlaces(planRoute.coords, activity); setNearbyLoading(false); setNearby(r); }
@@ -1539,7 +1547,8 @@ function PlanScreen({ C, s, activity, pts, prefs, setPrefs, planRoute, loading, 
   const [helpOpen, setHelpOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [prefsOpen, setPrefsOpen] = useState(false);
-  const selCount = Object.keys(prefs || {}).length;
+  const roadLabel = (roadOptsFor(activity).find((o: any) => o.key === (prefs?.road)) || roadOptsFor(activity)[0]).label;
+  const themeCount = (prefs?.themes || []).length;
   return (
     <>
       <View style={s.planTop}>
@@ -1552,10 +1561,10 @@ function PlanScreen({ C, s, activity, pts, prefs, setPrefs, planRoute, loading, 
         {helpOpen && <Text style={[s.sub, { marginTop: 8 }]}>Dotknij mapy = dodaj punkt · przeciągnij = przesuń · przytrzymaj = usuń</Text>}
         <TouchableOpacity style={s.detailsToggle} activeOpacity={0.7} onPress={() => setPrefsOpen((o) => !o)}>
           <Ionicons name="options-outline" size={16} color={C.accent} />
-          <Text style={s.detailsToggleTxt}>Charakter trasy{selCount ? ` (${selCount})` : ''}</Text>
+          <Text style={s.detailsToggleTxt}>{roadLabel}{themeCount ? ` · ${themeCount} do zobaczenia` : ''}</Text>
           <Ionicons name={prefsOpen ? 'chevron-up' : 'chevron-down'} size={16} color={C.dim} />
         </TouchableOpacity>
-        {prefsOpen && <ScrollView style={{ maxHeight: 230, marginTop: 4 }} contentContainerStyle={{ paddingRight: 50 }} nestedScrollEnabled showsVerticalScrollIndicator={false}><WeightedPrefs C={C} s={s} prefs={prefs || {}} onChange={setPrefs} options={genPrefsFor(activity)} /></ScrollView>}
+        {prefsOpen && <ScrollView style={{ maxHeight: 250, marginTop: 4 }} contentContainerStyle={{ paddingRight: 50 }} nestedScrollEnabled showsVerticalScrollIndicator={false}><RouteCharacter C={C} s={s} activity={activity} prefs={prefs || {}} onChange={setPrefs} showDifficulty={false} /></ScrollView>}
       </View>
 
       <TouchableOpacity style={[s.fitBtn, { top: 198 }]} activeOpacity={0.8} onPress={onFit}>
@@ -2393,26 +2402,34 @@ function Slider({ C, s, value, onChange }: any) {
   );
 }
 // Multi-select pillsy + suwaki % („co jest dla mnie ważne") — wspólne dla generatora i planera
-function WeightedPrefs({ C, s, prefs, onChange, options }: any) {
-  const toggle = (k: string) => { const np = { ...prefs }; if (k in np) delete np[k]; else np[k] = 60; onChange(np); };
-  const sel = options.filter((o: any) => o.key in prefs);
+// Charakter trasy: 3 grupy. Tryb drogi = single-select; Co zobaczyć = multi; Trudność = suwak (opcjonalny przez showDifficulty)
+function RouteCharacter({ C, s, activity, prefs, onChange, showDifficulty }: any) {
+  const p = prefs || {};
+  const roads = roadOptsFor(activity);
+  const road = p.road || roads[0].key;
+  const themes: string[] = p.themes || [];
+  const setRoad = (k: string) => onChange({ ...p, road: k });
+  const toggleTheme = (k: string) => { const has = themes.includes(k); onChange({ ...p, themes: has ? themes.filter((x) => x !== k) : [...themes, k] }); };
+  const Chip = ({ on, ion, label, onPress }: any) => (
+    <TouchableOpacity style={[s.genThemeChip, on && s.genThemeChipOn]} activeOpacity={0.8} onPress={onPress}>
+      <Ionicons name={ion} size={15} color={on ? C.bg : C.txt} /><Text style={[s.genThemeTxt, on && { color: C.bg }]}>{label}</Text>
+    </TouchableOpacity>
+  );
   return (
     <View>
-      <View style={s.genChipRow}>
-        {options.map((o: any) => { const on = o.key in prefs; return (
-          <TouchableOpacity key={o.key} style={[s.genThemeChip, on && s.genThemeChipOn]} activeOpacity={0.8} onPress={() => toggle(o.key)}>
-            <Ionicons name={o.ion} size={15} color={on ? C.bg : C.txt} /><Text style={[s.genThemeTxt, on && { color: C.bg }]}>{o.label}</Text>
-          </TouchableOpacity>
-        ); })}
-      </View>
-      {sel.length > 0 && <Text style={[s.sub, { fontSize: 12, marginTop: 12 }]}>Jak ważne (przeciągnij):</Text>}
-      {sel.map((o: any) => (
-        <View key={o.key} style={s.prefRow}>
-          <Text style={s.prefLabel} numberOfLines={1}>{o.label}</Text>
-          <View style={{ flex: 1 }}><Slider C={C} s={s} value={prefs[o.key]} onChange={(v: number) => onChange({ ...prefs, [o.key]: v })} /></View>
-          <Text style={s.prefPct}>{prefs[o.key]}%</Text>
-        </View>
-      ))}
+      <Text style={[s.groupLabel, { marginTop: 0 }]}>Tryb drogi</Text>
+      <View style={s.genChipRow}>{roads.map((o: any) => <Chip key={o.key} on={road === o.key} ion={o.ion} label={o.label} onPress={() => setRoad(o.key)} />)}</View>
+      <Text style={s.groupLabel}>Co zobaczyć po drodze</Text>
+      <View style={s.genChipRow}>{THEME_OPTS.map((o: any) => <Chip key={o.key} on={themes.includes(o.key)} ion={o.ion} label={o.label} onPress={() => toggleTheme(o.key)} />)}</View>
+      {showDifficulty && (
+        <>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <Text style={s.groupLabel}>Trudność / podjazdy</Text>
+            <Text style={[s.prefPct, { width: 'auto' as any }]}>{diffLabel(p.difficulty ?? 40)}</Text>
+          </View>
+          <View style={{ marginTop: 2 }}><Slider C={C} s={s} value={p.difficulty ?? 40} onChange={(v: number) => onChange({ ...p, difficulty: v })} /></View>
+        </>
+      )}
     </View>
   );
 }
@@ -2451,15 +2468,14 @@ function GeneratorScreen({ C, s, step, area, radius, setRadius, cfg, setCfg, loa
         <ScrollView contentContainerStyle={{ padding: 18, paddingBottom: 110 }} showsVerticalScrollIndicator={false}>
           <Text style={[s.groupLabel, { marginTop: 0 }]}>Aktywność</Text>
           <View style={s.segment}>
-            <TouchableOpacity style={[s.segBtn, cfg.activity === 'bike' && s.segBtnOn]} activeOpacity={0.85} onPress={() => up({ activity: 'bike', prefs: { cyclepath: 60, scenery: 40 } })}><Ionicons name="bicycle" size={18} color={cfg.activity === 'bike' ? C.bg : C.txt} /><Text style={[s.segTxt, cfg.activity === 'bike' && s.segTxtOn]}>Rower</Text></TouchableOpacity>
-            <TouchableOpacity style={[s.segBtn, cfg.activity === 'walk' && s.segBtnOn]} activeOpacity={0.85} onPress={() => up({ activity: 'walk', prefs: { trails: 60, scenery: 40 } })}><Ionicons name="walk" size={18} color={cfg.activity === 'walk' ? C.bg : C.txt} /><Text style={[s.segTxt, cfg.activity === 'walk' && s.segTxtOn]}>Spacer</Text></TouchableOpacity>
+            <TouchableOpacity style={[s.segBtn, cfg.activity === 'bike' && s.segBtnOn]} activeOpacity={0.85} onPress={() => up({ activity: 'bike', prefs: { road: 'cyclepath', themes: cfg.prefs?.themes || ['nature'], difficulty: cfg.prefs?.difficulty ?? 40 } })}><Ionicons name="bicycle" size={18} color={cfg.activity === 'bike' ? C.bg : C.txt} /><Text style={[s.segTxt, cfg.activity === 'bike' && s.segTxtOn]}>Rower</Text></TouchableOpacity>
+            <TouchableOpacity style={[s.segBtn, cfg.activity === 'walk' && s.segBtnOn]} activeOpacity={0.85} onPress={() => up({ activity: 'walk', prefs: { road: 'trails', themes: cfg.prefs?.themes || ['nature'], difficulty: cfg.prefs?.difficulty ?? 40 } })}><Ionicons name="walk" size={18} color={cfg.activity === 'walk' ? C.bg : C.txt} /><Text style={[s.segTxt, cfg.activity === 'walk' && s.segTxtOn]}>Spacer</Text></TouchableOpacity>
           </View>
 
           <Text style={s.groupLabel}>Długość ({cfg.activity === 'walk' ? 'spacer' : 'trasa'})</Text>
           <View style={s.genChipRow}>{[3, 5, 8, 12].map((l) => <Pill key={l} on={cfg.lengthKm === l} label={l + ' km'} onPress={() => up({ lengthKm: l })} />)}</View>
 
-          <Text style={s.groupLabel}>Co jest dla Ciebie ważne? (wybierz kilka)</Text>
-          <WeightedPrefs C={C} s={s} prefs={cfg.prefs || {}} onChange={(p: any) => up({ prefs: p })} options={genPrefsFor(cfg.activity)} />
+          <RouteCharacter C={C} s={s} activity={cfg.activity} prefs={cfg.prefs || {}} onChange={(p: any) => up({ prefs: p })} showDifficulty />
 
           <Text style={s.groupLabel}>Kształt</Text>
           <View style={s.genChipRow}>{[['loop', 'Pętla (wróć do startu)'], ['oneway', 'W jedną stronę']].map(([k, l]) => <Pill key={k} on={cfg.shape === k} label={l} onPress={() => up({ shape: k })} />)}</View>
