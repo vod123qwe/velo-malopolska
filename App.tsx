@@ -320,7 +320,7 @@ function elevationRuns(path: number[][], eles: number[]): any[] | null {
 // re-routing przez gęste punkty z istniejącej ścieżki daje messages (typ drogi) zmapowane na geometrię. Cache w pamięci.
 async function surfaceRunsFor(route: any): Promise<any[] | null> {
   if (route._surfRuns !== undefined) return route._surfRuns;
-  const path = route.path;
+  const path = route.path || route.coords;
   if (!path || path.length < 2) { route._surfRuns = null; return null; }
   const wpts = sampleArr(path, 25);
   const lonlats = wpts.map((p: number[]) => `${p[1]},${p[0]}`).join('|');
@@ -1089,6 +1089,22 @@ export default function App() {
     callMap('paintRoute', JSON.stringify({ plain: true, color: r.color }));
     return true;
   };
+  // to samo dla zaplanowanej trasy (planRoute ma .coords, własna linia planLine → paintPlan)
+  const applyPlanPaint = async (mode: string): Promise<boolean> => {
+    const r = planRoute; if (!r || !r.coords) return false;
+    if (mode === 'surf') {
+      const runs = await surfaceRunsFor(r);
+      callMap('paintPlan', JSON.stringify({ runs: runs || [], path: r.coords, plain: !runs }));
+      return !!(runs && runs.length);
+    }
+    if (mode === 'elev') {
+      const runs = elevationRuns(r.coords, r.eles);
+      callMap('paintPlan', JSON.stringify({ runs: runs || [], path: r.coords, plain: !runs }));
+      return !!(runs && runs.length);
+    }
+    callMap('paintPlan', JSON.stringify({ plain: true, path: r.coords }));
+    return true;
+  };
 
   /* ---- Generator tras ---- */
   const enterGenerator = () => { setGenStep('area'); setGenAreaState(null); setGenResults([]); setGenCfg((c: any) => ({ ...c, activity })); setScreen('generate'); setTimeout(() => { callMap('clearAll'); callMap('setGenPick', true); }, 60); };
@@ -1191,7 +1207,7 @@ export default function App() {
       {screen === 'tab' && tab === 'dashboard' && <Dashboard C={C} s={s} activity={activity} onSetActivity={setActivity} onOpen={openDetail} saved={savedRoutes} favs={favs} onFav={toggleFav} onPlan={goPlan} onGenerate={enterGenerator} onRoutes={() => goTab('routes')} refreshing={refreshing} onRefresh={onRefresh} riding={riding} rideName={route?.name} onResume={resumeRide} rideProgress={riding ? { inMemory: !!ride.current, done: ride.current ? hud.done : (pendingResume?.progress?.distM || 0), total: ride.current ? hud.total : (route?.distance || 0) * 1000, elapsed: ride.current ? hud.elapsed : (pendingResume?.progress?.elapsedSec || 0), nextName: hud.nextName, nextDist: hud.nextDist, activity: route?.activity || 'bike', game: !!route?.game } : null} />}
       {screen === 'tab' && tab === 'routes' && <RoutesList C={C} s={s} activity={activity} onOpen={openDetail} saved={savedRoutes} onDeleteSaved={deleteSaved} refreshing={refreshing} onRefresh={onRefresh} onPlan={goPlan} favs={favs} onFav={toggleFav} userLoc={userLoc} />}
       {screen === 'tab' && tab === 'profile' && <Profile C={C} s={s} theme={theme} onToggleTheme={toggleTheme} onStyle={() => setStyleOpen(true)} saved={savedRoutes} activity={activity} onSetActivity={setActivity} quizState={quizState} rideStats={rideStats} history={history} voiceOn={voiceOn} onToggleVoice={toggleVoice} />}
-      {screen === 'plan' && !nearbyOpen && <PlanScreen C={C} s={s} activity={activity} pts={planPts} prefs={planPrefs} setPrefs={setPlanPrefs} planRoute={planRoute} loading={planLoading} onUndo={planUndo} onClear={planClear} onSave={planSave} onRide={planRideNow} onLayers={() => setStyleOpen(true)} onFit={() => callMap('fitPlan')} onBack={planBack} addedPois={addedPois} onOpenNearby={openNearby} />}
+      {screen === 'plan' && !nearbyOpen && <PlanScreen C={C} s={s} activity={activity} pts={planPts} prefs={planPrefs} setPrefs={setPlanPrefs} planRoute={planRoute} loading={planLoading} onUndo={planUndo} onClear={planClear} onSave={planSave} onRide={planRideNow} onLayers={() => setStyleOpen(true)} onFit={() => callMap('fitPlan')} onBack={planBack} addedPois={addedPois} onOpenNearby={openNearby} onPaint={applyPlanPaint} />}
       {screen === 'plan' && nearbyOpen && <NearbyExplore C={C} s={s} nearby={nearby} nearbyRadius={nearbyRadius} setNearbyRadius={setNearbyRadius} typeHidden={typeHidden} setTypeHidden={setTypeHidden} addedPois={addedPois} onTogglePoi={togglePoi} onOpenPoi={setSheet} onSave={saveNearby} onCancel={cancelNearby} onHighlight={(p: any) => callMap('highlightPoi', p.lat, p.lon)} loading={nearbyLoading} tapIdx={nearbyTap} />}
 
       {screen === 'summary' && <SummaryScreen C={C} s={s} data={summary} onClose={() => { setSummary(null); goTab('dashboard'); }} onProfile={() => { setSummary(null); goTab('profile'); }} />}
@@ -1542,13 +1558,25 @@ function RoutesList({ C, s, activity, onOpen, saved, onDeleteSaved, refreshing, 
 }
 
 /* ---------- Plan ---------- */
-function PlanScreen({ C, s, activity, pts, prefs, setPrefs, planRoute, loading, onUndo, onClear, onSave, onRide, onLayers, onFit, onBack, addedPois, onOpenNearby }: any) {
+function PlanScreen({ C, s, activity, pts, prefs, setPrefs, planRoute, loading, onUndo, onClear, onSave, onRide, onLayers, onFit, onBack, addedPois, onOpenNearby, onPaint }: any) {
   const W = Dimensions.get('window').width - 60;
   const [helpOpen, setHelpOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const roadLabel = (roadOptsFor(activity).find((o: any) => o.key === (prefs?.road)) || roadOptsFor(activity)[0]).label;
   const themeCount = (prefs?.themes || []).length;
+  const [paint, setPaint] = useState('plain');
+  const [paintBusy, setPaintBusy] = useState(false);
+  const rsig = planRoute?.coords?.length || 0;
+  useEffect(() => { setPaint('plain'); }, [rsig]); // przeliczona trasa → reset (mapa rysuje zwykłą linię)
+  const changePaint = async (mode: string) => {
+    if (paintBusy) return;
+    if (mode === paint) mode = 'plain';
+    setPaint(mode);
+    if (mode === 'surf') { setPaintBusy(true); const ok = await onPaint('surf'); setPaintBusy(false); if (!ok) setPaint('plain'); }
+    else onPaint(mode);
+  };
+  const PAINTS = [{ k: 'surf', l: 'Typ drogi', ic: 'git-branch-outline' }, { k: 'elev', l: 'Wzniesienia', ic: 'trending-up-outline' }];
   return (
     <>
       <View style={s.planTop}>
@@ -1583,7 +1611,19 @@ function PlanScreen({ C, s, activity, pts, prefs, setPrefs, planRoute, loading, 
               <Text style={s.detailsToggleTxt}>Szczegóły trasy</Text>
               <Ionicons name={detailsOpen ? 'chevron-up' : 'chevron-down'} size={16} color={C.dim} />
             </TouchableOpacity>
-            {detailsOpen && <>{activity !== 'walk' && <ElevationChart C={C} eles={planRoute.eles} width={W} />}<SurfaceBars s={s} surfaces={planRoute.surfaces} /></>}
+            {detailsOpen && <>
+              {activity !== 'walk' && <ElevationChart C={C} eles={planRoute.eles} width={W} />}
+              <SurfaceBars s={s} surfaces={planRoute.surfaces} />
+              <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
+                {PAINTS.map((p) => { const on = paint === p.k; const busy = paintBusy && p.k === 'surf'; return (
+                  <TouchableOpacity key={p.k} activeOpacity={0.8} style={[s.modePill, { flexDirection: 'row', alignItems: 'center', gap: 6 }, on && s.modePillOn]} onPress={() => changePaint(p.k)}>
+                    {busy ? <ActivityIndicator size="small" color={on ? C.bg : C.txt} /> : <Ionicons name={p.ic as any} size={15} color={on ? C.bg : C.dim} />}
+                    <Text style={[s.modePillTxt, on && s.modePillTxtOn]}>{p.l}</Text>
+                  </TouchableOpacity>
+                ); })}
+                <Text style={[s.sub, { fontSize: 11, alignSelf: 'center', flex: 1 }]}>pokaż na mapie</Text>
+              </View>
+            </>}
             <TouchableOpacity style={[s.nearbyBtn, { marginTop: 12 }]} activeOpacity={0.8} onPress={onOpenNearby}>
               <Ionicons name="location-outline" size={16} color={C.txt} />
               <Text style={s.rcTxt}>Punkty w pobliżu{addedPois.length ? ` · ${addedPois.length}` : ''}</Text>

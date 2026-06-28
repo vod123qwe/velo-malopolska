@@ -182,7 +182,8 @@ export const MAP_HTML = `<!DOCTYPE html>
   };
 
   /* ---- tryb planowania trasy ---- */
-  var planMarkers=[], planLine=null, planActive=false, planPoiMarkers=[], nearbyMarkers=[], poiHighlight=null;
+  var planMarkers=[], planLine=null, planActive=false, planPoiMarkers=[], nearbyMarkers=[], poiHighlight=null, planPaintLayers=[];
+  function clearPlanPaint(){ planPaintLayers.forEach(function(l){map.removeLayer(l);}); planPaintLayers=[]; }
   function onMapClick(e){ send({type:'mapclick', lat:+e.latlng.lat.toFixed(6), lon:+e.latlng.lng.toFixed(6)}); }
   window.setPlanning=function(on){
     planActive=on;
@@ -215,8 +216,20 @@ export const MAP_HTML = `<!DOCTYPE html>
   };
   window.setPlanRoute=function(json){
     var pts=JSON.parse(json);
+    clearPlanPaint(); // geometria się zmieniła → zdejmij kolorowanie (typ drogi/wzniesienia)
     if(planLine){ map.removeLayer(planLine); planLine=null; }
     if(pts && pts.length){ planLine=L.polyline(pts,{color:'#3ee08a',weight:6,opacity:.95}).addTo(map); }
+  };
+  // kolorowanie zaplanowanej trasy: runs=[{pts,color}] (typ drogi/wzniesienia) albo plain → zwykła zielona linia
+  window.paintPlan=function(json){
+    var o=JSON.parse(json); clearPlanPaint();
+    if(o.plain || !o.runs || !o.runs.length){
+      if(planLine){ map.removeLayer(planLine); planLine=null; }
+      planLine=L.polyline(o.path||[],{color:'#3ee08a',weight:6,opacity:.95}).addTo(map);
+      return;
+    }
+    if(planLine){ map.removeLayer(planLine); planLine=null; } // schowaj bazową, pokaż kolorowane odcinki
+    o.runs.forEach(function(run){ if(run.pts && run.pts.length>1) planPaintLayers.push(L.polyline(run.pts,{color:run.color,weight:6,opacity:.95,lineCap:'round'}).addTo(map)); });
   };
   window.setPlanPois=function(json){
     var pts=JSON.parse(json);
@@ -243,6 +256,7 @@ export const MAP_HTML = `<!DOCTYPE html>
     planMarkers.forEach(function(m){map.removeLayer(m);}); planMarkers=[];
     planPoiMarkers.forEach(function(m){map.removeLayer(m);}); planPoiMarkers=[];
     nearbyMarkers.forEach(function(m){map.removeLayer(m);}); nearbyMarkers=[];
+    clearPlanPaint();
     if(planLine){ map.removeLayer(planLine); planLine=null; }
   };
   window.fitPlan=function(){
