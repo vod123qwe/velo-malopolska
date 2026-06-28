@@ -57,7 +57,9 @@ export const MAP_HTML = `<!DOCTYPE html>
   window.setMapStyle=function(k){ curStyle=k; applyTiles(); };
 
   var routeLine=null, poiMarkers=[], meMarker=null, doneLine=null, approachLine=null, headingDeg=null;
-  function send(o){ if(window.ReactNativeWebView) window.ReactNativeWebView.postMessage(JSON.stringify(o)); }
+  function send(o){ var s=JSON.stringify(o); if(window.ReactNativeWebView) window.ReactNativeWebView.postMessage(s); else if(window.parent && window.parent!==window) window.parent.postMessage(s,'*'); }
+  // WEB (iframe): odbiór komend z aplikacji jako {__cmd, args} → wywołanie window[fn](...args)
+  window.addEventListener('message', function(e){ try{ var d = typeof e.data==='string'? JSON.parse(e.data): e.data; if(d && d.__cmd && typeof window[d.__cmd]==='function') window[d.__cmd].apply(null, d.args||[]); }catch(err){} });
   var CAT={'Zamek':'#b4690e','Ruiny':'#b4690e','Zabytek':'#b4690e','Kościół':'#7c5cff','Punkt widokowy':'#0e9f6e','Szczyt':'#0e9f6e','Atrakcja':'#e0399b','Kawiarnia':'#9a6a3a','Miejsce piknikowe':'#0e9f6e','Restauracja':'#e0399b','Parking':'#3aa0ff','Jaskinia':'#5a6675','Miejsce':'#3aa0ff'};
   var SVGMAP={'Zamek':'landmark','Ruiny':'landmark','Zabytek':'landmark','Kościół':'church','Punkt widokowy':'eye','Szczyt':'mountain','Atrakcja':'star','Kawiarnia':'cup','Restauracja':'cup','Miejsce piknikowe':'tree','Parking':'parking','Jaskinia':'dot','Miejsce':'dot'};
   function poiIcon(kind){

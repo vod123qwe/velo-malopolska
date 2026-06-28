@@ -23,8 +23,16 @@
       "predictiveBackGestureEnabled": false
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro",
+      "output": "single",
+      "name": "VeloMałopolska",
+      "shortName": "Velo",
+      "display": "standalone",
+      "themeColor": "#0b0f14",
+      "backgroundColor": "#ffffff"
     },
+    "experiments": { "baseUrl": "/velo-malopolska" },
     "plugins": [
       [
         "expo-location",

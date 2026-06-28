@@ -471,7 +471,8 @@ export default function App() {
   const C = useMemo(() => makeColors(theme), [theme]);
   const s = useMemo(() => makeStyles(C), [C]);
 
-  const webRef = useRef<WebView>(null);
+  const webRef = useRef<any>(null);
+  const isWeb = Platform.OS === 'web';
   const [screen, setScreen] = useState<'tab' | 'detail' | 'ride' | 'plan'>('tab');
   const [tab, setTab] = useState<'dashboard' | 'routes' | 'profile'>('dashboard');
   const [route, setRoute] = useState<any>(null);
@@ -584,13 +585,14 @@ export default function App() {
   const onRefresh = useCallback(() => { setRefreshing(true); setTimeout(reloadApp, 120); }, [reloadApp]);
 
   const callMap = useCallback((fn: string, ...args: any[]) => {
+    if (Platform.OS === 'web') { try { webRef.current?.contentWindow?.postMessage(JSON.stringify({ __cmd: fn, args }), '*'); } catch {} return; }
     const a = args.map((x) => JSON.stringify(x)).join(',');
     webRef.current?.injectJavaScript(`window.${fn} && window.${fn}(${a}); true;`);
   }, []);
 
-  const onMessage = (e: any) => {
+  const handleMapData = (raw: string) => {
     try {
-      const m = JSON.parse(e.nativeEvent.data);
+      const m = JSON.parse(raw);
       if (m.type === 'ready') {
         mapReady.current = true;
         callMap('setTheme', theme);
@@ -606,6 +608,14 @@ export default function App() {
       if (m.type === 'genpick') { setGenAreaState({ lat: m.lat, lon: m.lon }); callMap('setGenArea', m.lat, m.lon, genRadius, true); }
     } catch {}
   };
+  const onMessage = (e: any) => handleMapData(e.nativeEvent.data);
+  // WEB: most odbierający komunikaty z iframe (mapa) przez window 'message'
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const h = (e: any) => { if (typeof e.data === 'string') handleMapData(e.data); };
+    window.addEventListener('message', h);
+    return () => window.removeEventListener('message', h);
+  });
 
   const [navReturn, setNavReturn] = useState<'tab' | 'generate'>('tab'); // dokąd wraca „wstecz" z detalu/planera
   const openDetail = (r: any, ret: 'tab' | 'generate' = 'tab') => {
@@ -967,7 +977,9 @@ export default function App() {
 
       {/* Mapa zawsze zamontowana (bez przeładowań); ekrany opaque ją zasłaniają */}
       <View style={s.mapFull}>
-        <WebView ref={webRef} originWhitelist={['*']} source={{ html: MAP_HTML }} onMessage={onMessage} style={{ backgroundColor: C.bg }} scrollEnabled={false} />
+        {isWeb
+          ? React.createElement('iframe', { ref: webRef, srcDoc: MAP_HTML, allow: 'geolocation', style: { border: 'none', width: '100%', height: '100%', display: 'block' } })
+          : <WebView ref={webRef} originWhitelist={['*']} source={{ html: MAP_HTML }} onMessage={onMessage} style={{ backgroundColor: C.bg }} scrollEnabled={false} />}
       </View>
 
       {screen === 'detail' && <DetailScreen C={C} s={s} route={route} onBack={detailBack} onPoi={setSheet} onStart={startRide} onLayers={() => setStyleOpen(true)} callMapFit={(b: number) => callMap('fitRoutePadded', b)} onFocusPoi={(la: number, lo: number) => callMap('focusPoi', la, lo)} onRename={openRename} onEdit={editSaved} onThumb={openThumb} />}
