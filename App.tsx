@@ -488,6 +488,36 @@ const THEME_TO_T: Record<string, string> = { history: 'historia', nature: 'przyr
 const DIFF_LABELS: [number, string][] = [[0, 'Płasko'], [20, 'Łatwa'], [40, 'Umiarkowana'], [60, 'Średnia'], [80, 'Wymagająca'], [100, 'Górska']];
 function diffLabel(v: number): string { let b = DIFF_LABELS[0]; for (const d of DIFF_LABELS) if (Math.abs(d[0] - (v ?? 40)) < Math.abs(b[0] - (v ?? 40))) b = d; return b[1]; }
 
+// === PLANER: intencje (multi → każda = osobna alternatywa) + miękkie „unikać" ===
+const PLAN_INTENTS_BIKE = [
+  { key: 'fast', label: 'Najszybciej', ion: 'flash-outline', profile: 'szybka' },
+  { key: 'quiet', label: 'Z dala od aut', ion: 'shield-checkmark-outline', profile: 'rowerowa' },
+  { key: 'paths', label: 'Leśne ścieżki', ion: 'trail-sign-outline', profile: 'gorska' },
+];
+const PLAN_INTENTS_WALK = [
+  { key: 'fast', label: 'Najkrótsza', ion: 'flash-outline', profile: 'krotka' },
+  { key: 'quiet', label: 'Spokojnie', ion: 'shield-checkmark-outline', profile: 'spacerowa' },
+  { key: 'paths', label: 'Szlaki', ion: 'trail-sign-outline', profile: 'szlak' },
+];
+const planIntentsFor = (a: string) => (a === 'walk' ? PLAN_INTENTS_WALK : PLAN_INTENTS_BIKE);
+const PLAN_AVOID = [
+  { key: 'cars', label: 'Ruchliwe drogi z autami', ion: 'car-outline' },
+  { key: 'steep', label: 'Strome podjazdy', ion: 'trending-up-outline' },
+];
+// chipy informacyjne (transparentność, nie blokują trasy)
+function carPct(route: any): number { const s = route?.surfaces || []; const tot = s.reduce((a: number, b: any) => a + (b.meters || 0), 0) || 1; const car = s.find((x: any) => x.label === 'Droga')?.meters || 0; return Math.round((car / tot) * 100); }
+function poisOnRoute(route: any, pool: any[], themes: string[]): number {
+  if (!route?.coords || !pool?.length) return 0;
+  const want = new Set((themes || []).map((k) => THEME_TO_T[k]));
+  let n = 0;
+  for (const p of pool) {
+    if (want.size && !want.has(themeFromKind(p.kind))) continue;
+    let bd = 1e12; for (const c of route.coords) { const d = hav([p.lat, p.lon], c); if (d < bd) bd = d; if (bd < 120) break; }
+    if (bd < 350) n++;
+  }
+  return n;
+}
+
 // tryb drogi → profil routingu BRouter
 function prefProfile(activity: string, prefs: any): string {
   const r = (prefs || {}).road;
@@ -673,8 +703,11 @@ export default function App() {
   const [activity, setActivityState] = useState<'bike' | 'walk'>('bike');
   // planowanie tras
   const [planPts, setPlanPts] = useState<number[][]>([]);
-  const [planPrefs, setPlanPrefs] = useState<any>({ road: 'cyclepath', themes: [] });
+  const [planPrefs, setPlanPrefs] = useState<any>({ intents: ['quiet'], avoid: [], themes: [] });
   const [planRoute, setPlanRoute] = useState<any>(null);
+  const [planAlts, setPlanAlts] = useState<any[]>([]); // alternatywy: jedna trasa na wybraną intencję
+  const [activeAlt, setActiveAlt] = useState(0);
+  const [planPoiPool, setPlanPoiPool] = useState<any[]>([]); // POI w okolicy trasy (do chipów „atrakcje"), tylko gdy wybrano motywy
   const [planLoading, setPlanLoading] = useState(false);
   const [nearby, setNearby] = useState<any[]>([]);
   const [nearbyLoading, setNearbyLoading] = useState(false);
@@ -721,7 +754,7 @@ export default function App() {
       if (ms) setMapStyleState(ms);
       if (mr) { try { setSavedRoutes(JSON.parse(mr)); } catch {} }
       if (fv) { try { setFavs(JSON.parse(fv)); } catch {} }
-      if (ac === 'walk' || ac === 'bike') { setActivityState(ac); CURRENT_ACTIVITY = ac; setPlanPrefs(ac === 'walk' ? { road: 'trails', themes: [] } : { road: 'cyclepath', themes: [] }); }
+      if (ac === 'walk' || ac === 'bike') { setActivityState(ac); CURRENT_ACTIVITY = ac; setPlanPrefs({ intents: ['quiet'], avoid: [], themes: [] }); }
       if (th) { try { const arr = JSON.parse(th); if (Array.isArray(arr)) setTypeHidden(arr); } catch {} }
       if (rd) { const n = +rd; if (n > 0) setNearbyRadius(n); }
       if (qz) { try { const q = JSON.parse(qz); if (q && typeof q.points === 'number' && q.done) setQuizState(q); } catch {} }
@@ -740,7 +773,7 @@ export default function App() {
   useEffect(() => { if (prefsLoaded.current) AsyncStorage.setItem('poiRadius', String(nearbyRadius)); }, [nearbyRadius]);
   useEffect(() => { if (prefsLoaded.current) AsyncStorage.setItem('quizState', JSON.stringify(quizState)); }, [quizState]);
   const toggleFav = (id: string) => { setFavs((prev) => { const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]; AsyncStorage.setItem('favRoutes', JSON.stringify(next)); return next; }); };
-  const setActivity = (a: 'bike' | 'walk') => { setActivityState(a); CURRENT_ACTIVITY = a; AsyncStorage.setItem('activityMode', a); setPlanPrefs(a === 'walk' ? { road: 'trails', themes: [] } : { road: 'cyclepath', themes: [] }); setPlanPts([]); setPlanRoute(null); setNearby([]); setAddedPois([]); };
+  const setActivity = (a: 'bike' | 'walk') => { setActivityState(a); CURRENT_ACTIVITY = a; AsyncStorage.setItem('activityMode', a); setPlanPrefs({ intents: ['quiet'], avoid: [], themes: [] }); setPlanPts([]); setPlanRoute(null); setPlanAlts([]); setNearby([]); setAddedPois([]); };
   useEffect(() => { if (mapReady.current) callMap('setTheme', theme); }, [theme]);
   useEffect(() => { if (mapReady.current) callMap('setMapStyle', mapStyle); }, [mapStyle]);
   const toggleTheme = () => { const nt = theme === 'dark' ? 'light' : 'dark'; setThemeState(nt); AsyncStorage.setItem('theme', nt); };
@@ -815,22 +848,48 @@ export default function App() {
     else setNearbyOpen(false);
   }, [screen]);
 
+  // ALTERNATYWY: jedna trasa na każdą wybraną intencję (Najszybciej / Z dala od aut / Leśne ścieżki)
   useEffect(() => {
     if (screen !== 'plan') return;
     callMap('setWaypoints', JSON.stringify(planPts));
-    if (planPts.length < 2) { setPlanRoute(null); callMap('setPlanRoute', JSON.stringify([])); return; }
+    if (planPts.length < 2) { setPlanAlts([]); setPlanRoute(null); setPlanPoiPool([]); callMap('setPlanRoute', JSON.stringify([])); return; }
     let cancelled = false; setPlanLoading(true);
-    routeThrough(planPts, prefProfile(activity, planPrefs)).then((res) => {
-      if (cancelled) return;
-      setPlanLoading(false); setPlanRoute(res);
-      setNearby([]); // geometria się zmieniła → odśwież sugestie POI przy następnym otwarciu
-      callMap('setPlanRoute', JSON.stringify(res ? res.coords : []));
-    });
+    const intents = (planPrefs.intents && planPrefs.intents.length) ? planPrefs.intents : ['quiet'];
+    const opts = planIntentsFor(activity).filter((o) => intents.includes(o.key));
+    Promise.all(opts.map((o) => routeThrough(planPts, o.profile).then((r) => (r && r.coords && r.coords.length >= 2) ? { key: o.key, label: o.label, ion: o.ion, route: r } : null)))
+      .then((list) => {
+        if (cancelled) return;
+        setPlanLoading(false); setNearby([]); setPlanPoiPool([]);
+        setPlanAlts(list.filter(Boolean)); // wybór aktywnej → efekt poniżej
+      });
     return () => { cancelled = true; };
-  }, [planPts, planPrefs, activity]);
+  }, [planPts, (planPrefs.intents || []).join(','), activity, screen]);
 
+  // wybór aktywnej alternatywy (miękkie „unikać" tylko PRZESTAWIA wybór — nie blokuje, nie przelicza)
+  useEffect(() => {
+    if (!planAlts.length) { setPlanRoute(null); return; }
+    const avoid = planPrefs.avoid || [];
+    let best = 0;
+    if (avoid.includes('cars')) { let bv = 1e9; planAlts.forEach((a, i) => { const v = carPct(a.route); if (v < bv) { bv = v; best = i; } }); }
+    else if (avoid.includes('steep')) { let bv = 1e15; planAlts.forEach((a, i) => { const v = a.route.ascent || 0; if (v < bv) { bv = v; best = i; } }); }
+    setActiveAlt(best); setPlanRoute(planAlts[best].route);
+    callMap('setPlanRoute', JSON.stringify(planAlts[best].route.coords));
+  }, [planAlts, (planPrefs.avoid || []).join(',')]);
+
+  // pula POI w okolicy trasy do chipów „atrakcje" — TYLKO gdy wybrano „co zobaczyć" (Wikipedia, szybkie)
+  useEffect(() => {
+    const themes = planPrefs.themes || [];
+    if (screen !== 'plan' || !planRoute?.coords || !themes.length) { setPlanPoiPool([]); return; }
+    let cancelled = false;
+    const mid = planRoute.coords[Math.floor(planRoute.coords.length / 2)];
+    const radius = Math.min(10000, Math.max(1500, Math.round((planRoute.distM || 3000) / 2)));
+    fetchAreaPois(mid[0], mid[1], radius, []).then((r) => { if (!cancelled) setPlanPoiPool(r); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [planRoute?.coords?.length, (planPrefs.themes || []).join(','), screen]);
+
+  const selectAlt = (i: number) => { if (!planAlts[i]) return; setActiveAlt(i); setPlanRoute(planAlts[i].route); callMap('setPlanRoute', JSON.stringify(planAlts[i].route.coords)); };
   const planUndo = () => setPlanPts((p) => p.slice(0, -1));
-  const planClear = () => { setPlanPts([]); setPlanRoute(null); setNearby([]); setAddedPois([]); setNearbyOpen(false); callMap('clearPlan'); };
+  const planClear = () => { setPlanPts([]); setPlanRoute(null); setPlanAlts([]); setPlanPoiPool([]); setNearby([]); setAddedPois([]); setNearbyOpen(false); callMap('clearPlan'); };
   const addedSnapshot = useRef<any[]>([]);
   const openNearby = async () => {
     if (!planRoute) return;
@@ -1207,7 +1266,7 @@ export default function App() {
       {screen === 'tab' && tab === 'dashboard' && <Dashboard C={C} s={s} activity={activity} onSetActivity={setActivity} onOpen={openDetail} saved={savedRoutes} favs={favs} onFav={toggleFav} onPlan={goPlan} onGenerate={enterGenerator} onRoutes={() => goTab('routes')} refreshing={refreshing} onRefresh={onRefresh} riding={riding} rideName={route?.name} onResume={resumeRide} rideProgress={riding ? { inMemory: !!ride.current, done: ride.current ? hud.done : (pendingResume?.progress?.distM || 0), total: ride.current ? hud.total : (route?.distance || 0) * 1000, elapsed: ride.current ? hud.elapsed : (pendingResume?.progress?.elapsedSec || 0), nextName: hud.nextName, nextDist: hud.nextDist, activity: route?.activity || 'bike', game: !!route?.game } : null} />}
       {screen === 'tab' && tab === 'routes' && <RoutesList C={C} s={s} activity={activity} onOpen={openDetail} saved={savedRoutes} onDeleteSaved={deleteSaved} refreshing={refreshing} onRefresh={onRefresh} onPlan={goPlan} favs={favs} onFav={toggleFav} userLoc={userLoc} />}
       {screen === 'tab' && tab === 'profile' && <Profile C={C} s={s} theme={theme} onToggleTheme={toggleTheme} onStyle={() => setStyleOpen(true)} saved={savedRoutes} activity={activity} onSetActivity={setActivity} quizState={quizState} rideStats={rideStats} history={history} voiceOn={voiceOn} onToggleVoice={toggleVoice} />}
-      {screen === 'plan' && !nearbyOpen && <PlanScreen C={C} s={s} activity={activity} pts={planPts} prefs={planPrefs} setPrefs={setPlanPrefs} planRoute={planRoute} loading={planLoading} onUndo={planUndo} onClear={planClear} onSave={planSave} onRide={planRideNow} onLayers={() => setStyleOpen(true)} onFit={() => callMap('fitPlan')} onBack={planBack} addedPois={addedPois} onOpenNearby={openNearby} onPaint={applyPlanPaint} />}
+      {screen === 'plan' && !nearbyOpen && <PlanScreen C={C} s={s} activity={activity} pts={planPts} prefs={planPrefs} setPrefs={setPlanPrefs} planRoute={planRoute} alts={planAlts} activeAlt={activeAlt} onSelectAlt={selectAlt} poiPool={planPoiPool} loading={planLoading} onUndo={planUndo} onClear={planClear} onSave={planSave} onRide={planRideNow} onLayers={() => setStyleOpen(true)} onFit={() => callMap('fitPlan')} onBack={planBack} addedPois={addedPois} onOpenNearby={openNearby} onPaint={applyPlanPaint} />}
       {screen === 'plan' && nearbyOpen && <NearbyExplore C={C} s={s} nearby={nearby} nearbyRadius={nearbyRadius} setNearbyRadius={setNearbyRadius} typeHidden={typeHidden} setTypeHidden={setTypeHidden} addedPois={addedPois} onTogglePoi={togglePoi} onOpenPoi={setSheet} onSave={saveNearby} onCancel={cancelNearby} onHighlight={(p: any) => callMap('highlightPoi', p.lat, p.lon)} loading={nearbyLoading} tapIdx={nearbyTap} />}
 
       {screen === 'summary' && <SummaryScreen C={C} s={s} data={summary} onClose={() => { setSummary(null); goTab('dashboard'); }} onProfile={() => { setSummary(null); goTab('profile'); }} />}
@@ -1558,13 +1617,16 @@ function RoutesList({ C, s, activity, onOpen, saved, onDeleteSaved, refreshing, 
 }
 
 /* ---------- Plan ---------- */
-function PlanScreen({ C, s, activity, pts, prefs, setPrefs, planRoute, loading, onUndo, onClear, onSave, onRide, onLayers, onFit, onBack, addedPois, onOpenNearby, onPaint }: any) {
+function PlanScreen({ C, s, activity, pts, prefs, setPrefs, planRoute, alts, activeAlt, onSelectAlt, poiPool, loading, onUndo, onClear, onSave, onRide, onLayers, onFit, onBack, addedPois, onOpenNearby, onPaint }: any) {
   const W = Dimensions.get('window').width - 60;
   const [helpOpen, setHelpOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [prefsOpen, setPrefsOpen] = useState(false);
-  const roadLabel = (roadOptsFor(activity).find((o: any) => o.key === (prefs?.road)) || roadOptsFor(activity)[0]).label;
-  const themeCount = (prefs?.themes || []).length;
+  const intents: string[] = prefs?.intents || [];
+  const avoid: string[] = prefs?.avoid || [];
+  const themes: string[] = prefs?.themes || [];
+  const toggleIn = (field: string, k: string) => { const cur: string[] = prefs?.[field] || []; const has = cur.includes(k); const next = has ? cur.filter((x) => x !== k) : [...cur, k]; if (field === 'intents' && !next.length) return; setPrefs({ ...prefs, [field]: next }); };
+  const intentSummary = intents.length ? planIntentsFor(activity).filter((o: any) => intents.includes(o.key)).map((o: any) => o.label).join(' · ') : 'Wybierz charakter';
   const [paint, setPaint] = useState('plain');
   const [paintBusy, setPaintBusy] = useState(false);
   const rsig = planRoute?.coords?.length || 0;
@@ -1589,10 +1651,31 @@ function PlanScreen({ C, s, activity, pts, prefs, setPrefs, planRoute, loading, 
         {helpOpen && <Text style={[s.sub, { marginTop: 8 }]}>Dotknij mapy = dodaj punkt · przeciągnij = przesuń · przytrzymaj = usuń</Text>}
         <TouchableOpacity style={s.detailsToggle} activeOpacity={0.7} onPress={() => setPrefsOpen((o) => !o)}>
           <Ionicons name="options-outline" size={16} color={C.accent} />
-          <Text style={s.detailsToggleTxt}>{roadLabel}{themeCount ? ` · ${themeCount} do zobaczenia` : ''}</Text>
+          <Text style={s.detailsToggleTxt} numberOfLines={1}>{intentSummary}{themes.length ? ` · ${themes.length} do zobaczenia` : ''}</Text>
           <Ionicons name={prefsOpen ? 'chevron-up' : 'chevron-down'} size={16} color={C.dim} />
         </TouchableOpacity>
-        {prefsOpen && <ScrollView style={{ maxHeight: 250, marginTop: 4 }} contentContainerStyle={{ paddingRight: 50 }} nestedScrollEnabled showsVerticalScrollIndicator={false}><RouteCharacter C={C} s={s} activity={activity} prefs={prefs || {}} onChange={setPrefs} showDifficulty={false} /></ScrollView>}
+        {prefsOpen && (
+          <ScrollView style={{ maxHeight: 260, marginTop: 6 }} contentContainerStyle={{ paddingRight: 50, paddingBottom: 6 }} nestedScrollEnabled showsVerticalScrollIndicator={false}>
+            <Text style={[s.groupLabel, { marginTop: 0 }]}>Jak chcę jechać <Text style={{ color: C.dim, fontWeight: '400' }}>(kilka = kilka propozycji)</Text></Text>
+            <View style={s.genChipRow}>{planIntentsFor(activity).map((o: any) => { const on = intents.includes(o.key); return (
+              <TouchableOpacity key={o.key} style={[s.genThemeChip, on && s.genThemeChipOn]} activeOpacity={0.8} onPress={() => toggleIn('intents', o.key)}>
+                <Ionicons name={o.ion} size={15} color={on ? C.bg : C.txt} /><Text style={[s.genThemeTxt, on && { color: C.bg }]}>{o.label}</Text>
+              </TouchableOpacity>
+            ); })}</View>
+            <Text style={s.groupLabel}>Czego unikać <Text style={{ color: C.dim, fontWeight: '400' }}>(nie blokuje — wybiera najlepszą)</Text></Text>
+            <View style={s.genChipRow}>{PLAN_AVOID.map((o: any) => { const on = avoid.includes(o.key); return (
+              <TouchableOpacity key={o.key} style={[s.genThemeChip, on && s.genThemeChipOn]} activeOpacity={0.8} onPress={() => toggleIn('avoid', o.key)}>
+                <Ionicons name={o.ion} size={15} color={on ? C.bg : C.txt} /><Text style={[s.genThemeTxt, on && { color: C.bg }]}>{o.label}</Text>
+              </TouchableOpacity>
+            ); })}</View>
+            <Text style={s.groupLabel}>Co zobaczyć po drodze <Text style={{ color: C.dim, fontWeight: '400' }}>(filtruje „Punkty w pobliżu")</Text></Text>
+            <View style={s.genChipRow}>{THEME_OPTS.map((o: any) => { const on = themes.includes(o.key); return (
+              <TouchableOpacity key={o.key} style={[s.genThemeChip, on && s.genThemeChipOn]} activeOpacity={0.8} onPress={() => toggleIn('themes', o.key)}>
+                <Ionicons name={o.ion} size={15} color={on ? C.bg : C.txt} /><Text style={[s.genThemeTxt, on && { color: C.bg }]}>{o.label}</Text>
+              </TouchableOpacity>
+            ); })}</View>
+          </ScrollView>
+        )}
       </View>
 
       <TouchableOpacity style={[s.fitBtn, { top: 198 }]} activeOpacity={0.8} onPress={onFit}>
@@ -1606,7 +1689,30 @@ function PlanScreen({ C, s, activity, pts, prefs, setPrefs, planRoute, loading, 
         {loading && <ActivityIndicator size="small" color={C.dim} style={{ position: 'absolute', top: 14, right: 16, zIndex: 2 }} />}
         {planRoute ? (
           <>
+            {alts && alts.length > 1 && (
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 10, flexGrow: 0 }} contentContainerStyle={{ gap: 8 }}>
+                {alts.map((a: any, i: number) => { const on = i === activeAlt; return (
+                  <TouchableOpacity key={a.key} style={[s.modePill, { flexDirection: 'row', alignItems: 'center', gap: 6 }, on && s.modePillOn]} activeOpacity={0.8} onPress={() => onSelectAlt(i)}>
+                    <Ionicons name={a.ion as any} size={14} color={on ? C.bg : C.dim} />
+                    <Text style={[s.modePillTxt, on && s.modePillTxtOn]}>{a.label}</Text>
+                    <Text style={[s.modePillTxt, { fontWeight: '400', opacity: 0.7 }, on && s.modePillTxtOn]}>{(a.route.distM / 1000).toFixed(1)}km</Text>
+                  </TouchableOpacity>
+                ); })}
+              </ScrollView>
+            )}
             <RouteStats s={s} distM={planRoute.distM} timeMin={planRoute.timeMin} ascent={planRoute.ascent} descent={planRoute.descent} showElevation={activity !== 'walk'} />
+            {(() => {
+              const cp = carPct(planRoute); const top = (planRoute.surfaces || [])[0];
+              const atr = themes.length ? poisOnRoute(planRoute, poiPool, themes) : null;
+              const carCol = cp >= 20 ? C.danger : cp >= 8 ? '#e0a000' : C.accent;
+              return (
+                <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
+                  <View style={[s.infoChip, { backgroundColor: carCol + '22' }]}><Ionicons name="car-outline" size={12} color={carCol} /><Text style={[s.infoChipTxt, { color: carCol }]}>{cp}% dróg z autami</Text></View>
+                  {top && <View style={s.infoChip}><View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: top.color }} /><Text style={s.infoChipTxt}>{Math.round((top.meters / (planRoute.surfaces.reduce((x: number, y: any) => x + y.meters, 0) || 1)) * 100)}% {top.label.toLowerCase()}</Text></View>}
+                  {atr != null && <View style={[s.infoChip, atr > 0 && { backgroundColor: C.accent + '22' }]}><Ionicons name="sparkles-outline" size={12} color={atr > 0 ? C.accent : C.dim} /><Text style={[s.infoChipTxt, atr > 0 && { color: C.accent }]}>{atr > 0 ? `${atr} do zobaczenia` : 'mało atrakcji w okolicy'}</Text></View>}
+                </View>
+              );
+            })()}
             <TouchableOpacity style={s.detailsToggle} activeOpacity={0.7} onPress={() => setDetailsOpen((o) => !o)}>
               <Text style={s.detailsToggleTxt}>Szczegóły trasy</Text>
               <Ionicons name={detailsOpen ? 'chevron-up' : 'chevron-down'} size={16} color={C.dim} />
@@ -2684,6 +2790,8 @@ function makeStyles(C: C) {
     prefRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 8 },
     prefLabel: { color: C.txt, fontSize: 13, fontWeight: '600', width: 108 },
     prefPct: { color: C.accent, fontSize: 13, fontWeight: '800', width: 42, textAlign: 'right' },
+    infoChip: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 9, paddingVertical: 5, borderRadius: 999, backgroundColor: C.surface, borderWidth: 1, borderColor: C.stroke },
+    infoChipTxt: { color: C.dim, fontSize: 11.5, fontWeight: '700' },
     genPanel: { flex: 1, backgroundColor: C.bg },
     genHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingTop: 60, paddingHorizontal: 18, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: C.stroke },
     genHeaderT: { color: C.txt, fontSize: 18, fontWeight: '800', letterSpacing: -0.3 },
