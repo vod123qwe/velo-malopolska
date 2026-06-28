@@ -516,9 +516,17 @@ async function buildThemedRoute(area: any, cfg: any, activity: string, group: an
   }
   if (!chosen.length) return null;
   if (cfg.endCafe && theme.key !== 'jedzenie') { /* opcjonalna meta w kawiarni dla nie-gastro tras dodaje sens */ }
-  const wpts: number[][] = [start, ...chosen.map((p) => [p.lat, p.lon])];
+  let wpts: number[][] = [start, ...chosen.map((p) => [p.lat, p.lon])];
   if (cfg.shape === 'loop') wpts.push(start);
-  const res = await routeThrough(wpts, prefProfile(activity, cfg.prefs));
+  let res = await routeThrough(wpts, prefProfile(activity, cfg.prefs));
+  if (!res || !res.coords || res.coords.length < 2) {
+    // ratunek: połowa punktów + łagodny profil — zwykle to jeden nieosiągalny punkt psuł całą trasę
+    const half = chosen.slice(0, Math.max(1, Math.ceil(chosen.length / 2)));
+    const w2: number[][] = [start, ...half.map((p) => [p.lat, p.lon])];
+    if (cfg.shape === 'loop') w2.push(start);
+    const r2 = await routeThrough(w2, activity === 'walk' ? 'spacerowa' : 'rowerowa');
+    if (r2 && r2.coords && r2.coords.length >= 2) { res = r2; wpts = w2; chosen.length = 0; chosen.push(...half); }
+  }
   if (!res || !res.coords || res.coords.length < 2) return null;
   const km = res.distM / 1000;
   const nm = (cfg.game ? 'Gra: ' : '') + theme.label + ' • ' + km.toFixed(1) + ' km';
@@ -532,20 +540,52 @@ async function buildThemedRoute(area: any, cfg: any, activity: string, group: an
     themeKey: theme.key, themeLabel: theme.label, themeIon: theme.ion, waypoints: wpts,
   };
 }
+// Awaryjna pętla wokół środka obszaru — nie wymaga POI; ratuje gdy brak punktów / routing tematyczny padł
+async function buildLoopRoute(area: any, cfg: any, activity: string, idx: number, bearingDeg: number, pool: any[]): Promise<any> {
+  const km = Math.max(2, cfg.lengthKm || 5);
+  const R = ((km * 1000) / (2 * Math.PI)) * 0.6; // promień pierścienia (drogi kluczą i nadkładają → mniejszy promień, by trafić w zadaną długość)
+  const N = 7, start = [area.lat, area.lon];
+  const cosLat = Math.cos((area.lat * Math.PI) / 180) || 1;
+  const ring: number[][] = [];
+  for (let i = 1; i < N; i++) {
+    const ang = (bearingDeg * Math.PI) / 180 + (i / N) * 2 * Math.PI;
+    ring.push([area.lat + (R * Math.cos(ang)) / 111000, area.lon + (R * Math.sin(ang)) / (111000 * cosLat)]);
+  }
+  const wpts = [start, ...ring, start];
+  let res = await routeThrough(wpts, prefProfile(activity, cfg.prefs));
+  if (!res || !res.coords || res.coords.length < 2) res = await routeThrough(wpts, activity === 'walk' ? 'spacerowa' : 'rowerowa');
+  if (!res || !res.coords || res.coords.length < 2) return null;
+  const stops: any[] = []; // dołącz POI leżące blisko pętli (jeśli są)
+  for (const p of (pool || [])) { let bd = 1e12; for (const c of res.coords) { const d = hav([p.lat, p.lon], c); if (d < bd) bd = d; if (bd < 120) break; } if (bd < 400) { stops.push(p); if (stops.length >= 6) break; } }
+  const km2 = res.distM / 1000;
+  return {
+    id: 'genloop' + Date.now() + '_' + idx, name: 'Pętla w okolicy • ' + km2.toFixed(1) + ' km', net: 'Pętla', netClass: 'rcn',
+    region: 'Wygenerowana w okolicy', distance: +km2.toFixed(1), timeMin: res.timeMin,
+    difficulty: km2 < 4 ? 'Łatwa' : km2 < 9 ? 'Średnia' : 'Dłuższa',
+    color: ['#14b8a6', '#3ee08a', '#f5a623', '#8b5cf6'][idx % 4], desc: 'Okrężna trasa w wybranym obszarze' + (stops.length ? ' z ciekawymi miejscami po drodze.' : '.'),
+    path: res.coords, pois: stops.map((p) => ({ name: p.name, kind: p.kind, lat: p.lat, lon: p.lon, wikipedia: p.wikipedia || undefined, desc: '', ...(cfg.game ? { quiz: QUIZZES[p.name] || makeAutoQuiz(p) } : {}) })),
+    ascent: res.ascent, descent: res.descent, eles: res.eles, surfaces: res.surfaces, activity, game: !!cfg.game,
+    themeKey: 'loop', themeLabel: 'Pętla', themeIon: 'repeat-outline', waypoints: wpts,
+  };
+}
 // Generuje JEDNĄ trasę na każdą kategorię, która ma punkty w obszarze (różnorodność = różne tematy)
 async function generateRoutes(area: any, cfg: any, activity: string, onPartial?: (rs: any[]) => void): Promise<any[]> {
   CURRENT_ACTIVITY = activity; // by routeThrough użył właściwych profili
   let pois = await fetchAreaPois(area.lat, area.lon, area.radius, GEN_THEMES.map((t) => t.key));
   // gęste centrum (np. Kraków) → zapytanie potrafi timeoutować; ponów z mniejszym promieniem (lżejsze, szybsze)
   if (!pois.length && area.radius > 800) pois = await fetchAreaPois(area.lat, area.lon, Math.round(area.radius * 0.5), GEN_THEMES.map((t) => t.key));
-  if (!pois.length) return [];
-  const groups = GEN_THEMES.map((th, i) => ({ th, i, group: pois.filter((p) => p.theme === th.key) })).filter((g) => g.group.length >= 1);
   const byScore = (a: any, b: any) => scoreRoute(b, cfg.prefs) - scoreRoute(a, cfg.prefs);
-  // wszystkie kategorie liczone RÓWNOLEGLE; każda trasa pokazuje się GDY GOTOWA (nie czekamy na najwolniejszą)
   const acc: any[] = [];
-  await Promise.all(groups.map((g) => buildThemedRoute(area, cfg, activity, g.group, g.th, g.i)
-    .then((r) => { if (r) { acc.push(r); if (onPartial) onPartial(acc.slice().sort(byScore)); } })
-    .catch(() => {})));
+  const push = (r: any) => { if (r) { acc.push(r); if (onPartial) onPartial(acc.slice().sort(byScore)); } };
+  // 1) trasy tematyczne (gdy są punkty) — RÓWNOLEGLE, każda pokazuje się gdy gotowa
+  const groups = GEN_THEMES.map((th, i) => ({ th, i, group: pois.filter((p) => p.theme === th.key) })).filter((g) => g.group.length >= 1);
+  await Promise.all(groups.map((g) => buildThemedRoute(area, cfg, activity, g.group, g.th, g.i).then(push).catch(() => {})));
+  // 2) fallback: za mało tras (lub brak POI) → dorzuć okrężne pętle w różnych kierunkach (nie wymagają punktów)
+  if (acc.length < 3) {
+    const bearings = [10, 140, 270, 80, 200, 320];
+    const tries = Math.min(bearings.length, Math.max(3 - acc.length + 1, 3));
+    await Promise.all(bearings.slice(0, tries).map((b, i) => buildLoopRoute(area, cfg, activity, 100 + i, b, pois).then(push).catch(() => {})));
+  }
   return acc.sort(byScore);
 }
 
