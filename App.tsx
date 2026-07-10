@@ -554,42 +554,58 @@ function scoreRoute(r: any, prefs: any): number {
   s += (1 - diff) * flat + diff * (1 - flat);
   return s;
 }
-// Buduje jedną trasę z puli POI danej KATEGORII (nearest-neighbor od środka)
-async function buildThemedRoute(area: any, cfg: any, activity: string, group: any[], theme: any, idx: number): Promise<any> {
+// „ciekawość" POI wg typu — trasa AI wybiera wg wartości, nie samej bliskości
+function poiWeight(kind: string): number {
+  switch (kind) {
+    case 'Zamek': case 'Ruiny': return 5;
+    case 'Punkt widokowy': case 'Szczyt': case 'Jaskinia': return 4;
+    case 'Zabytek': case 'Atrakcja': return 3;
+    case 'Kościół': return 2;
+    case 'Restauracja': case 'Kawiarnia': return 2;
+    default: return 1;
+  }
+}
+// kąt wokół środka → kolejność „dookoła" = pętla bez zawracania (zamiast nearest-neighbor, który zygzakuje)
+function angleAround(c: number[], p: any): number { return Math.atan2(p.lat - c[0], p.lon - c[1]); }
+function whyFor(kind: string): string {
+  const m: Record<string, string> = { 'Zamek': 'Zamek', 'Ruiny': 'Ruiny', 'Zabytek': 'Zabytek', 'Kościół': 'Zabytkowy kościół', 'Punkt widokowy': 'Punkt widokowy', 'Szczyt': 'Szczyt', 'Jaskinia': 'Jaskinia', 'Restauracja': 'Przystanek na jedzenie', 'Kawiarnia': 'Kawiarnia po drodze', 'Atrakcja': 'Atrakcja' };
+  return m[kind] || 'Ciekawe miejsce';
+}
+// POI-FIRST: trasa jest ŁĄCZNIKIEM między najciekawszymi miejscami. Kolejność po kącie = spójna pętla.
+// Rola typów: gastro = jeden przystanek; zabytki/natura/widoki = mijane po drodze.
+async function buildTour(area: any, cfg: any, activity: string, waypool: any[], foodpool: any[], opts: any): Promise<any> {
   const start = [area.lat, area.lon];
-  const perStop = activity === 'walk' ? 0.7 : 1.8;
-  const want = Math.max(2, Math.min(8, Math.round(cfg.lengthKm / perStop)));
-  const pool = group.slice().sort((a, b) => a.d - b.d).slice(0, Math.max(want * 3, 12));
-  const chosen: any[] = []; let cur = start; const used = new Set<number>();
-  while (chosen.length < want && used.size < pool.length) {
-    let best = -1, bd = 1e12;
-    for (let i = 0; i < pool.length; i++) { if (used.has(i)) continue; const d = hav(cur, [pool[i].lat, pool[i].lon]); if (d < bd) { bd = d; best = i; } }
-    if (best < 0) break; used.add(best); chosen.push(pool[best]); cur = [pool[best].lat, pool[best].lon];
-  }
-  if (!chosen.length) return null;
-  if (cfg.endCafe && theme.key !== 'jedzenie') { /* opcjonalna meta w kawiarni dla nie-gastro tras dodaje sens */ }
-  let wpts: number[][] = [start, ...chosen.map((p) => [p.lat, p.lon])];
+  const perStop = activity === 'walk' ? 1.5 : 2.8; // km na przystanek
+  let target = Math.max(2, Math.min(8, Math.round((cfg.lengthKm || 5) / perStop)));
+  if (opts.more) target += 2; // wariant „co jeśli": dłużej, ale więcej atrakcji
+  let picks = waypool.slice(0, Math.min(target, waypool.length));
+  let seq = picks.slice();
+  const food = foodpool && foodpool[0];
+  if (food) seq.push(food); // najwyżej jeden przystanek gastro (cel odpoczynku, nie łańcuch knajp)
+  seq.sort((a, b) => angleAround(start, a) - angleAround(start, b)); // dookoła środka
+  let wpts: number[][] = [start, ...seq.map((p) => [p.lat, p.lon])];
   if (cfg.shape === 'loop') wpts.push(start);
-  let res = await routeThrough(wpts, prefProfile(activity, cfg.prefs));
+  let res = await routeThrough(wpts, opts.profile || prefProfile(activity, cfg.prefs));
   if (!res || !res.coords || res.coords.length < 2) {
-    // ratunek: połowa punktów + łagodny profil — zwykle to jeden nieosiągalny punkt psuł całą trasę
-    const half = chosen.slice(0, Math.max(1, Math.ceil(chosen.length / 2)));
-    const w2: number[][] = [start, ...half.map((p) => [p.lat, p.lon])];
-    if (cfg.shape === 'loop') w2.push(start);
+    // ratunek: co drugi przystanek + łagodny profil (zwykle jeden nieosiągalny punkt psuł całość)
+    seq = seq.filter((_, i) => i % 2 === 0);
+    let w2: number[][] = [start, ...seq.map((p) => [p.lat, p.lon])]; if (cfg.shape === 'loop') w2.push(start);
     const r2 = await routeThrough(w2, activity === 'walk' ? 'spacerowa' : 'rowerowa');
-    if (r2 && r2.coords && r2.coords.length >= 2) { res = r2; wpts = w2; chosen.length = 0; chosen.push(...half); }
+    if (r2 && r2.coords && r2.coords.length >= 2) { res = r2; wpts = w2; }
   }
-  if (!res || !res.coords || res.coords.length < 2) return null;
+  if (!res || !res.coords || res.coords.length < 2 || !seq.length) return null;
   const km = res.distM / 1000;
-  const nm = (cfg.game ? 'Gra: ' : '') + theme.label + ' • ' + km.toFixed(1) + ' km';
+  const stops = seq.map((p) => ({ name: p.name, kind: p.kind, lat: p.lat, lon: p.lon, wikipedia: p.wikipedia || undefined, why: whyFor(p.kind), desc: '', ...(cfg.game ? { quiz: QUIZZES[p.name] || makeAutoQuiz(p) } : {}) }));
+  const narr = stops.map((x) => x.name.replace(/ w .*/, '')).join(' → ');
   return {
-    id: 'gen' + Date.now() + '_' + idx, name: nm, net: cfg.game ? 'Gra terenowa' : theme.label, netClass: 'rcn',
-    region: 'Wygenerowana w okolicy', distance: +km.toFixed(1), timeMin: res.timeMin,
-    difficulty: km < 4 ? 'Łatwa' : km < 9 ? 'Średnia' : 'Dłuższa',
-    color: ['#3ee08a', '#8b5cf6', '#f5a623', '#14b8a6', '#e0399b', '#0c8599'][idx % 6], desc: 'Trasa tematyczna: ' + theme.label + '.',
-    path: res.coords, pois: chosen.map((p) => ({ name: p.name, kind: p.kind, lat: p.lat, lon: p.lon, wikipedia: p.wikipedia || undefined, desc: '', ...(cfg.game ? { quiz: QUIZZES[p.name] || makeAutoQuiz(p) } : {}) })),
-    ascent: res.ascent, descent: res.descent, eles: res.eles, surfaces: res.surfaces, activity, game: !!cfg.game,
-    themeKey: theme.key, themeLabel: theme.label, themeIon: theme.ion, waypoints: wpts,
+    id: 'gen' + Date.now() + '_' + opts.idx, name: (cfg.game ? 'Gra: ' : '') + (opts.label || 'Wycieczka') + ' • ' + km.toFixed(1) + ' km',
+    net: opts.label || 'Wycieczka', netClass: 'rcn', region: 'Wygenerowana w okolicy',
+    distance: +km.toFixed(1), timeMin: res.timeMin, difficulty: km < 4 ? 'Łatwa' : km < 9 ? 'Średnia' : 'Dłuższa',
+    color: opts.whatif ? '#f5a623' : ['#3ee08a', '#8b5cf6', '#14b8a6', '#0c8599'][opts.idx % 4],
+    desc: narr, path: res.coords, pois: stops, stops, narr,
+    ascent: res.ascent, descent: res.descent, eles: res.eles, surfaces: res.surfaces,
+    activity, game: !!cfg.game, whatif: !!opts.whatif, breaks: null,
+    themeKey: 'tour', themeLabel: opts.label || 'Wycieczka', themeIon: opts.ion || 'sparkles-outline', waypoints: wpts,
   };
 }
 // Awaryjna pętla wokół środka obszaru — nie wymaga POI; ratuje gdy brak punktów / routing tematyczny padł
@@ -620,25 +636,39 @@ async function buildLoopRoute(area: any, cfg: any, activity: string, idx: number
     themeKey: 'loop', themeLabel: 'Pętla', themeIon: 'repeat-outline', waypoints: wpts,
   };
 }
-// Generuje JEDNĄ trasę na każdą kategorię, która ma punkty w obszarze (różnorodność = różne tematy)
+// POI-FIRST: układa wycieczki WOKÓŁ najciekawszych miejsc (nie pętla z doklejonymi punktami).
 async function generateRoutes(area: any, cfg: any, activity: string, onPartial?: (rs: any[]) => void): Promise<any[]> {
-  CURRENT_ACTIVITY = activity; // by routeThrough użył właściwych profili
-  let pois = await fetchAreaPois(area.lat, area.lon, area.radius, GEN_THEMES.map((t) => t.key));
-  // gęste centrum (np. Kraków) → zapytanie potrafi timeoutować; ponów z mniejszym promieniem (lżejsze, szybsze)
-  if (!pois.length && area.radius > 800) pois = await fetchAreaPois(area.lat, area.lon, Math.round(area.radius * 0.5), GEN_THEMES.map((t) => t.key));
-  const byScore = (a: any, b: any) => scoreRoute(b, cfg.prefs) - scoreRoute(a, cfg.prefs);
+  CURRENT_ACTIVITY = activity;
+  let pois = await fetchAreaPois(area.lat, area.lon, area.radius, []);
+  if (!pois.length && area.radius > 800) pois = await fetchAreaPois(area.lat, area.lon, Math.round(area.radius * 0.5), []);
+  const themes: string[] = cfg.prefs?.themes || [];
+  const want = new Set(themes.map((k) => THEME_TO_T[k]));
+  const cand = pois.filter((p) => !want.size || want.has(p.theme));
+  // waypointy (zabytki/natura/atrakcje) rankowane wg CIEKAWOŚCI, potem bliskości; gastro osobno (jeden przystanek)
+  const waypool = cand.filter((p) => p.theme !== 'jedzenie').sort((a, b) => poiWeight(b.kind) - poiWeight(a.kind) || a.d - b.d);
+  const useFood = !want.size || want.has('jedzenie');
+  const foodpool = cand.filter((p) => p.theme === 'jedzenie').sort((a, b) => a.d - b.d);
+  const order = (list: any[]) => { const m = list.filter((r) => !r.whatif).sort((a, b) => scoreRoute(b, cfg.prefs) - scoreRoute(a, cfg.prefs)); const w = list.filter((r) => r.whatif); return [...m, ...w]; };
   const acc: any[] = [];
-  const push = (r: any) => { if (r) { acc.push(r); if (onPartial) onPartial(acc.slice().sort(byScore)); } };
-  // 1) trasy tematyczne (gdy są punkty) — RÓWNOLEGLE, każda pokazuje się gdy gotowa
-  const groups = GEN_THEMES.map((th, i) => ({ th, i, group: pois.filter((p) => p.theme === th.key) })).filter((g) => g.group.length >= 1);
-  await Promise.all(groups.map((g) => buildThemedRoute(area, cfg, activity, g.group, g.th, g.i).then(push).catch(() => {})));
-  // 2) fallback: za mało tras (lub brak POI) → dorzuć okrężne pętle w różnych kierunkach (nie wymagają punktów)
-  if (acc.length < 3) {
-    const bearings = [10, 140, 270, 80, 200, 320];
-    const tries = Math.min(bearings.length, Math.max(3 - acc.length + 1, 3));
-    await Promise.all(bearings.slice(0, tries).map((b, i) => buildLoopRoute(area, cfg, activity, 100 + i, b, pois).then(push).catch(() => {})));
+  const push = (r: any) => { if (r) { acc.push(r); if (onPartial) onPartial(order(acc)); } };
+  if (waypool.length) {
+    await buildTour(area, cfg, activity, waypool, useFood ? foodpool : [], { idx: 0, label: 'Wycieczka', ion: 'sparkles-outline' }).then(push).catch(() => {});
+    if (waypool.length > 3) await buildTour(area, cfg, activity, waypool.slice(1), useFood ? foodpool : [], { idx: 1, label: 'Inny wariant', ion: 'shuffle-outline' }).then(push).catch(() => {});
+    if (waypool.length > 4) await buildTour(area, cfg, activity, waypool, useFood ? foodpool : [], { idx: 2, label: 'Dłuższa, więcej atrakcji', ion: 'star-outline', more: true, whatif: true }).then(push).catch(() => {});
   }
-  return acc.sort(byScore);
+  // fallback: brak/za mało POI → okrężne pętle (nie wymagają punktów), żeby nigdy nie było pustki
+  if (acc.length < 2) {
+    const bearings = [10, 140, 270, 80];
+    const tries = Math.max(2 - acc.length, 2);
+    await Promise.all(bearings.slice(0, tries).map((b, i) => buildLoopRoute(area, cfg, activity, 100 + i, b, cand).then(push).catch(() => {})));
+  }
+  // opisz „co dostajesz w zamian" na wariantach what-if względem głównej trasy
+  const list = order(acc); const main = list.find((r) => !r.whatif);
+  if (main) list.filter((r) => r.whatif).forEach((w) => {
+    const dkm = w.distance - main.distance; const extra = Math.max(0, (w.pois?.length || 0) - (main.pois?.length || 0));
+    w.breaks = (dkm > 0.2 ? `dłuższa o ${dkm.toFixed(1)} km` : 'inny przebieg') + (extra > 0 ? `, +${extra} ${extra === 1 ? 'atrakcja' : 'atrakcje'}` : '');
+  });
+  return list;
 }
 
 // Wysokość dla gotowych tras (open-elevation, próbkowane)
@@ -2489,8 +2519,17 @@ function GenPoiRow({ C, s, poi, game, active, onPress }: any) {
 }
 function GenBrowCard({ C, s, route, width, active, onPreview, onEdit, onSave, onOpenPoi }: any) {
   const game = !!route.game;
+  const cp = carPct(route);
+  const top = (route.surfaces || [])[0];
+  const totM = (route.surfaces || []).reduce((x: number, y: any) => x + (y.meters || 0), 0) || 1;
   return (
     <View style={[s.genBrowCard, { width }]}>
+      {route.whatif && (
+        <View style={s.whatifBanner}>
+          <Ionicons name="bulb-outline" size={14} color="#e0a000" />
+          <Text style={s.whatifTxt} numberOfLines={2}>A co jeśli poluzujesz? {route.breaks ? '· ' + route.breaks : ''}</Text>
+        </View>
+      )}
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
         <View style={s.genCatBadge}><Ionicons name={(route.themeIon || 'map') as any} size={18} color={C.accent} /></View>
         <View style={{ flex: 1 }}>
@@ -2498,8 +2537,14 @@ function GenBrowCard({ C, s, route, width, active, onPreview, onEdit, onSave, on
           <Text style={s.sub}>{fmtKm(route.distance * 1000)} km · {route.timeMin} min · {route.pois.length} miejsc</Text>
         </View>
       </View>
-      <Text style={s.genBrowSection}>{game ? 'Zadania na trasie' : 'Punkty na trasie'} · dotknij, by doczytać</Text>
-      <ScrollView style={{ maxHeight: 210 }} nestedScrollEnabled showsVerticalScrollIndicator={false}>
+      {!!route.narr && <Text style={[s.sub, { marginTop: 8, lineHeight: 18, color: C.txt }]} numberOfLines={2}>{route.narr}</Text>}
+      <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap', marginTop: 10 }}>
+        <View style={[s.infoChip, { backgroundColor: (cp >= 20 ? C.danger : cp >= 8 ? '#e0a000' : C.accent) + '22' }]}><Ionicons name="car-outline" size={12} color={cp >= 20 ? C.danger : cp >= 8 ? '#e0a000' : C.accent} /><Text style={[s.infoChipTxt, { color: cp >= 20 ? C.danger : cp >= 8 ? '#e0a000' : C.accent }]}>{cp}% aut</Text></View>
+        {top && <View style={s.infoChip}><View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: top.color }} /><Text style={s.infoChipTxt}>{Math.round((top.meters / totM) * 100)}% {top.label.toLowerCase()}</Text></View>}
+        <View style={s.infoChip}><Ionicons name="location-outline" size={12} color={C.dim} /><Text style={s.infoChipTxt}>{route.pois.length} {game ? 'zadań' : 'przystanków'}</Text></View>
+      </View>
+      <Text style={s.genBrowSection}>{game ? 'Zadania na trasie' : 'Po drodze'} · dotknij, by doczytać</Text>
+      <ScrollView style={{ maxHeight: 168 }} nestedScrollEnabled showsVerticalScrollIndicator={false}>
         {route.pois.length ? route.pois.map((p: any, i: number) => (
           <GenPoiRow key={i} C={C} s={s} poi={p} game={game} active={active} onPress={() => onOpenPoi(p)} />
         )) : <Text style={[s.sub, { paddingVertical: 10 }]}>Brak punktów.</Text>}
@@ -2827,6 +2872,8 @@ function makeStyles(C: C) {
     prefPct: { color: C.accent, fontSize: 13, fontWeight: '800', width: 42, textAlign: 'right' },
     infoChip: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 9, paddingVertical: 5, borderRadius: 999, backgroundColor: C.surface, borderWidth: 1, borderColor: C.stroke },
     infoChipTxt: { color: C.dim, fontSize: 11.5, fontWeight: '700' },
+    whatifBanner: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#f5a62322', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 7, marginBottom: 10 },
+    whatifTxt: { color: '#e0a000', fontSize: 12, fontWeight: '800', flex: 1 },
     genPanel: { flex: 1, backgroundColor: C.bg },
     genHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingTop: 60, paddingHorizontal: 18, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: C.stroke },
     genHeaderT: { color: C.txt, fontSize: 18, fontWeight: '800', letterSpacing: -0.3 },
