@@ -535,12 +535,13 @@ function poisOnRoute(route: any, pool: any[], themes: string[]): number {
   return n;
 }
 
-// tryb drogi → profil routingu BRouter
-function prefProfile(activity: string, prefs: any): string {
-  const r = (prefs || {}).road;
-  if (activity === 'walk') { if (r === 'calm') return 'spacerowa'; if (r === 'short') return 'krotka'; return 'szlak'; }
-  switch (r) { case 'gravel': return 'szutrowa'; case 'fast': return 'szybka'; case 'quiet': return 'spokojna'; case 'mtb': return 'gorska'; case 'short': return 'krotka'; default: return 'rowerowa'; }
+// tryb drogi → profil routingu BRouter (pojedynczy klucz)
+function roadProfile(activity: string, key: string): string {
+  if (activity === 'walk') { if (key === 'calm') return 'spacerowa'; if (key === 'short') return 'krotka'; return 'szlak'; }
+  switch (key) { case 'gravel': return 'szutrowa'; case 'fast': return 'szybka'; case 'quiet': return 'spokojna'; case 'mtb': return 'gorska'; case 'short': return 'krotka'; default: return 'rowerowa'; }
 }
+// prefs mogą mieć roads[] (multi) lub road (legacy) → pierwszy tryb jako domyślny profil
+function prefProfile(activity: string, prefs: any): string { const k = (prefs?.roads && prefs.roads[0]) || prefs?.road; return roadProfile(activity, k); }
 // ranking wygenerowanych tras: dopasowanie tematów + cel trudności
 function scoreRoute(r: any, prefs: any): number {
   prefs = prefs || {};
@@ -651,10 +652,17 @@ async function generateRoutes(area: any, cfg: any, activity: string, onPartial?:
   const order = (list: any[]) => { const m = list.filter((r) => !r.whatif).sort((a, b) => scoreRoute(b, cfg.prefs) - scoreRoute(a, cfg.prefs)); const w = list.filter((r) => r.whatif); return [...m, ...w]; };
   const acc: any[] = [];
   const push = (r: any) => { if (r) { acc.push(r); if (onPartial) onPartial(order(acc)); } };
+  // tryby drogi (multi): jedna wycieczka na wybrany tryb → porównujesz np. ścieżki rowerowe vs szutrowa
+  const roadOpts = roadOptsFor(activity);
+  const roads: string[] = (cfg.prefs?.roads && cfg.prefs.roads.length) ? cfg.prefs.roads : [activity === 'walk' ? 'trails' : 'cyclepath'];
+  const modes = roadOpts.filter((o: any) => roads.includes(o.key));
   if (waypool.length) {
-    await buildTour(area, cfg, activity, waypool, useFood ? foodpool : [], { idx: 0, label: 'Wycieczka', ion: 'sparkles-outline' }).then(push).catch(() => {});
-    if (waypool.length > 3) await buildTour(area, cfg, activity, waypool.slice(1), useFood ? foodpool : [], { idx: 1, label: 'Inny wariant', ion: 'shuffle-outline' }).then(push).catch(() => {});
-    if (waypool.length > 4) await buildTour(area, cfg, activity, waypool, useFood ? foodpool : [], { idx: 2, label: 'Dłuższa, więcej atrakcji', ion: 'star-outline', more: true, whatif: true }).then(push).catch(() => {});
+    const jobs = modes.map((m: any, i: number) => buildTour(area, cfg, activity, waypool, useFood ? foodpool : [], { idx: i, label: m.label, ion: m.ion, profile: roadProfile(activity, m.key) }).then(push).catch(() => {}));
+    // gdy tylko jeden tryb → dodaj wariant z innym doborem punktów (różnorodność)
+    if (modes.length === 1 && waypool.length > 3) jobs.push(buildTour(area, cfg, activity, waypool.slice(1), useFood ? foodpool : [], { idx: 8, label: 'Inny wariant', ion: 'shuffle-outline', profile: roadProfile(activity, modes[0].key) }).then(push).catch(() => {}));
+    await Promise.all(jobs);
+    // what-if: dłuższa, więcej atrakcji (na pierwszym trybie)
+    if (waypool.length > 4) await buildTour(area, cfg, activity, waypool, useFood ? foodpool : [], { idx: 9, label: 'Dłuższa, więcej atrakcji', ion: 'star-outline', more: true, whatif: true, profile: roadProfile(activity, modes[0].key) }).then(push).catch(() => {});
   }
   // fallback: brak/za mało POI → okrężne pętle (nie wymagają punktów), żeby nigdy nie było pustki
   if (acc.length < 2) {
@@ -735,7 +743,7 @@ export default function App() {
   const [genStep, setGenStep] = useState<'area' | 'config' | 'results'>('area');
   const [genArea, setGenAreaState] = useState<{ lat: number; lon: number } | null>(null);
   const [genRadius, setGenRadius] = useState(1500);
-  const [genCfg, setGenCfg] = useState<any>({ activity: 'walk', lengthKm: 5, prefs: { road: 'trails', themes: ['nature'], difficulty: 40 }, shape: 'loop', game: false, endCafe: false });
+  const [genCfg, setGenCfg] = useState<any>({ activity: 'walk', lengthKm: 5, prefs: { roads: ['trails'], themes: ['nature'], difficulty: 40 }, shape: 'loop', game: false });
   const [genLoading, setGenLoading] = useState(false);
   const [genResults, setGenResults] = useState<any[]>([]);
   const answerQuiz = (name: string, correct: boolean) => setQuizState((prev) => {
@@ -2631,10 +2639,10 @@ function Slider({ C, s, value, onChange }: any) {
 // Charakter trasy: 3 grupy. Tryb drogi = single-select; Co zobaczyć = multi; Trudność = suwak (opcjonalny przez showDifficulty)
 function RouteCharacter({ C, s, activity, prefs, onChange, showDifficulty }: any) {
   const p = prefs || {};
-  const roads = roadOptsFor(activity);
-  const road = p.road || roads[0].key;
+  const roadsOpts = roadOptsFor(activity);
+  const roads: string[] = p.roads && p.roads.length ? p.roads : [roadsOpts[0].key];
   const themes: string[] = p.themes || [];
-  const setRoad = (k: string) => onChange({ ...p, road: k });
+  const toggleRoad = (k: string) => { const has = roads.includes(k); const next = has ? roads.filter((x) => x !== k) : [...roads, k]; if (!next.length) return; onChange({ ...p, roads: next }); };
   const toggleTheme = (k: string) => { const has = themes.includes(k); onChange({ ...p, themes: has ? themes.filter((x) => x !== k) : [...themes, k] }); };
   const Chip = ({ on, ion, label, onPress }: any) => (
     <TouchableOpacity style={[s.genThemeChip, on && s.genThemeChipOn]} activeOpacity={0.8} onPress={onPress}>
@@ -2643,8 +2651,8 @@ function RouteCharacter({ C, s, activity, prefs, onChange, showDifficulty }: any
   );
   return (
     <View>
-      <Text style={[s.groupLabel, { marginTop: 0 }]}>Tryb drogi</Text>
-      <View style={s.genChipRow}>{roads.map((o: any) => <Chip key={o.key} on={road === o.key} ion={o.ion} label={o.label} onPress={() => setRoad(o.key)} />)}</View>
+      <Text style={[s.groupLabel, { marginTop: 0 }]}>Tryb drogi <Text style={{ color: C.dim, fontWeight: '400' }}>(kilka = trasa na każdy)</Text></Text>
+      <View style={s.genChipRow}>{roadsOpts.map((o: any) => <Chip key={o.key} on={roads.includes(o.key)} ion={o.ion} label={o.label} onPress={() => toggleRoad(o.key)} />)}</View>
       <Text style={s.groupLabel}>Co zobaczyć po drodze</Text>
       <View style={s.genChipRow}>{THEME_OPTS.map((o: any) => <Chip key={o.key} on={themes.includes(o.key)} ion={o.ion} label={o.label} onPress={() => toggleTheme(o.key)} />)}</View>
       {showDifficulty && (
@@ -2694,8 +2702,8 @@ function GeneratorScreen({ C, s, step, area, radius, setRadius, cfg, setCfg, loa
         <ScrollView contentContainerStyle={{ padding: 18, paddingBottom: 110 }} showsVerticalScrollIndicator={false}>
           <Text style={[s.groupLabel, { marginTop: 0 }]}>Aktywność</Text>
           <View style={s.segment}>
-            <TouchableOpacity style={[s.segBtn, cfg.activity === 'bike' && s.segBtnOn]} activeOpacity={0.85} onPress={() => up({ activity: 'bike', prefs: { road: 'cyclepath', themes: cfg.prefs?.themes || ['nature'], difficulty: cfg.prefs?.difficulty ?? 40 } })}><Ionicons name="bicycle" size={18} color={cfg.activity === 'bike' ? C.bg : C.txt} /><Text style={[s.segTxt, cfg.activity === 'bike' && s.segTxtOn]}>Rower</Text></TouchableOpacity>
-            <TouchableOpacity style={[s.segBtn, cfg.activity === 'walk' && s.segBtnOn]} activeOpacity={0.85} onPress={() => up({ activity: 'walk', prefs: { road: 'trails', themes: cfg.prefs?.themes || ['nature'], difficulty: cfg.prefs?.difficulty ?? 40 } })}><Ionicons name="walk" size={18} color={cfg.activity === 'walk' ? C.bg : C.txt} /><Text style={[s.segTxt, cfg.activity === 'walk' && s.segTxtOn]}>Spacer</Text></TouchableOpacity>
+            <TouchableOpacity style={[s.segBtn, cfg.activity === 'bike' && s.segBtnOn]} activeOpacity={0.85} onPress={() => up({ activity: 'bike', prefs: { roads: ['cyclepath'], themes: cfg.prefs?.themes || ['nature'], difficulty: cfg.prefs?.difficulty ?? 40 } })}><Ionicons name="bicycle" size={18} color={cfg.activity === 'bike' ? C.bg : C.txt} /><Text style={[s.segTxt, cfg.activity === 'bike' && s.segTxtOn]}>Rower</Text></TouchableOpacity>
+            <TouchableOpacity style={[s.segBtn, cfg.activity === 'walk' && s.segBtnOn]} activeOpacity={0.85} onPress={() => up({ activity: 'walk', prefs: { roads: ['trails'], themes: cfg.prefs?.themes || ['nature'], difficulty: cfg.prefs?.difficulty ?? 40 } })}><Ionicons name="walk" size={18} color={cfg.activity === 'walk' ? C.bg : C.txt} /><Text style={[s.segTxt, cfg.activity === 'walk' && s.segTxtOn]}>Spacer</Text></TouchableOpacity>
           </View>
 
           <Text style={s.groupLabel}>Długość ({cfg.activity === 'walk' ? 'spacer' : 'trasa'})</Text>
@@ -2708,10 +2716,9 @@ function GeneratorScreen({ C, s, step, area, radius, setRadius, cfg, setCfg, loa
 
           <Text style={s.groupLabel}>Dodatkowo</Text>
           <View style={s.settingRow}><Text style={s.settingTxt}>Tryb gry terenowej (quizy)</Text><Switch value={cfg.game} onValueChange={(v) => up({ game: v })} trackColor={{ true: C.accent, false: C.stroke }} /></View>
-          <View style={s.settingRow}><Text style={s.settingTxt}>Meta w kawiarni</Text><Switch value={cfg.endCafe} onValueChange={(v) => up({ endCafe: v })} trackColor={{ true: C.accent, false: C.stroke }} /></View>
         </ScrollView>
         <View style={s.genFooter}>
-          <Text style={[s.sub, { textAlign: 'center', marginBottom: 10, fontSize: 12 }]}>Ułożę po jednej trasie dla każdej kategorii (historia, przyroda, jedzenie…) — przejrzysz i wybierzesz.</Text>
+          <Text style={[s.sub, { textAlign: 'center', marginBottom: 10, fontSize: 12 }]}>Ułożę wycieczki wokół najciekawszych miejsc dla Twoich tematów — przejrzysz i wybierzesz.</Text>
           <TouchableOpacity style={[s.btnPrimary, { flexDirection: 'row', gap: 8 }]} activeOpacity={0.85} onPress={onGenerate}>
             <Ionicons name="sparkles" size={17} color={C.bg} /><Text style={s.btnPrimaryTxt}>Generuj trasy</Text>
           </TouchableOpacity>
