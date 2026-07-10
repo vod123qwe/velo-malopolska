@@ -1094,7 +1094,7 @@ export default function App() {
     r.pois.forEach((p: any) => {
       if (p._skip) return;
       const dd = hav([lat, lon], [p.lat, p.lon]);
-      if (!p._voiced && dd < 320 && dd > 120) { p._voiced = true; speak('Za około ' + Math.round(dd / 50) * 50 + ' metrów ' + p.name); }
+      if (!p._voiced && dd < 360 && dd > 140) { p._voiced = true; approachPoi(p, dd); }
       if (!p._seen && dd < 130) { p._seen = true; announce(p); }
     });
     if (!r.lastSave || Date.now() - r.lastSave > 8000) { r.lastSave = Date.now(); AsyncStorage.setItem('activeRideProgress', JSON.stringify({ distM: traveled, elapsedSec: elapsed })); }
@@ -1102,13 +1102,22 @@ export default function App() {
   }, [callMap]);
   const skipNextPoi = () => { const r = ride.current; if (!r) return; const ahead = r.pois.filter((p: any) => p._along > (r.maxTraveled || 0) - 30 && !p._skip).sort((a: any, b: any) => a._along - b._along)[0]; if (ahead) { ahead._skip = true; Haptics.selectionAsync().catch(() => {}); } };
 
+  // ZBLIŻASZ SIĘ (z wyprzedzeniem ~150-360 m): zdążysz zwolnić, karta z opisem + zaproszenie do poczytania
+  const approachPoi = (p: any, dd: number) => {
+    const m = Math.round(dd / 50) * 50;
+    Haptics.selectionAsync().catch(() => {});
+    speak('Zbliżasz się do ' + p.name.replace(/ w .*/, '') + '. ' + (p.why || p.kind) + '. Warto poczytać.');
+    setAlert({ hd: 'ZBLIŻASZ SIĘ · ' + m + ' M', name: p.name, sub: p._desc || (p.kind + ' · dotknij, by poczytać'), kind: p.kind, poi: p });
+    clearTimeout(alertTimer.current);
+    alertTimer.current = setTimeout(() => setAlert(null), 7500);
+  };
   const announce = (p: any) => {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-    speak('Warto się zatrzymać. ' + p.name);
+    speak('Jesteś przy: ' + p.name.replace(/ w .*/, '') + '.');
     notifyPoi(p.name, p.kind); // realne powiadomienie systemowe
-    setAlert({ hd: 'WARTO SIĘ ZATRZYMAĆ', name: p.name, sub: p.kind + ' · dotknij, by przeczytać', kind: p.kind, poi: p });
+    setAlert({ hd: 'WARTO SIĘ ZATRZYMAĆ', name: p.name, sub: p._desc || (p.kind + ' · dotknij, by przeczytać'), kind: p.kind, poi: p });
     clearTimeout(alertTimer.current);
-    alertTimer.current = setTimeout(() => setAlert(null), 6000);
+    alertTimer.current = setTimeout(() => setAlert(null), 7000);
   };
   const announceBanner = (hd: string, name: string, ion: string, sub: string) => {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
@@ -1153,6 +1162,12 @@ export default function App() {
     if (rt) setRoute(rt);
     const cum = cumDist(r.path), total = cum[cum.length - 1];
     r.pois.forEach((p: any) => { p._along = alongDist(r.path, cum, p); p._seen = false; p._voiced = false; p._skip = false; });
+    // prefetch opisów (Wikipedia) → karta „zbliżasz się" pokaże treść od razu, bez czekania w trasie
+    r.pois.forEach((p: any) => {
+      if (p._desc !== undefined) return;
+      const done = (sm: any) => { const t = ((sm && sm.extract) || '').trim(); if (!t) { p._desc = null; return; } const dot = t.indexOf('. '); p._desc = (dot > 40 && dot < 180) ? t.slice(0, dot + 1) : (t.length > 170 ? t.slice(0, 167) + '…' : t); };
+      (p.wikipedia ? fetchWikiSummary(p.wikipedia) : fetchWikiByGeo(p.name, p.lat, p.lon)).then(done).catch(() => { p._desc = null; });
+    });
     ride.current = { path: r.path, cum, total, pois: r.pois, color: r.color, simDist: 0, simSpeed: 18, phase: 'trail', variantsData: null, approach: null, approachCum: null, t0: Date.now() };
     setMode(m); setPaused(false); setAlert(null); setVariants([]); setPhaseState('trail'); setNavStarted(false); setStatsOpen(false);
     setRiding(true); setPendingResume(null); setNavReturn('tab'); setScreen('ride');
@@ -1391,7 +1406,7 @@ export default function App() {
             <View style={{ flex: 1 }}>
               <Text style={s.alertHd}>{alert.hd}</Text>
               <Text style={s.alertName}>{alert.name}</Text>
-              <Text style={s.alertSub}>{alert.sub}</Text>
+              <Text style={s.alertSub} numberOfLines={2}>{alert.sub}</Text>
             </View>
           </View>
         </TouchableOpacity>
