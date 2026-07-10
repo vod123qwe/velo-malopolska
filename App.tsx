@@ -523,6 +523,17 @@ const PLAN_AVOID = [
 ];
 // chipy informacyjne (transparentność, nie blokują trasy)
 function carPct(route: any): number { const s = route?.surfaces || []; const tot = s.reduce((a: number, b: any) => a + (b.meters || 0), 0) || 1; const car = s.find((x: any) => x.label === 'Droga')?.meters || 0; return Math.round((car / tot) * 100); }
+function pathPct(route: any): number { const s = route?.surfaces || []; const tot = s.reduce((a: number, b: any) => a + (b.meters || 0), 0) || 1; const p = s.filter((x: any) => x.label === 'Ścieżka rowerowa' || x.label === 'Ścieżka / szlak').reduce((a: number, b: any) => a + (b.meters || 0), 0); return Math.round((p / tot) * 100); }
+// sortowanie wyników generatora — user wybiera przy wynikach, co dla niego ważne
+const GEN_SORTS = [{ k: 'rel', l: 'Trafność' }, { k: 'paths', l: 'Najwięcej ścieżek' }, { k: 'roads', l: 'Najmniej dróg' }, { k: 'short', l: 'Najkrótsza' }, { k: 'flat', l: 'Najbardziej płaska' }];
+function sortGen(routes: any[], key: string): any[] {
+  const a = [...routes];
+  if (key === 'paths') a.sort((x, y) => pathPct(y) - pathPct(x));
+  else if (key === 'roads') a.sort((x, y) => carPct(x) - carPct(y));
+  else if (key === 'short') a.sort((x, y) => x.distance - y.distance);
+  else if (key === 'flat') a.sort((x, y) => (x.ascent || 0) - (y.ascent || 0));
+  return a; // 'rel' → kolejność wejściowa (trafność + what-if na końcu)
+}
 function poisOnRoute(route: any, pool: any[], themes: string[]): number {
   if (!route?.coords || !pool?.length) return 0;
   const want = new Set((themes || []).map((k) => THEME_TO_T[k]));
@@ -2569,16 +2580,19 @@ function GenBrowCard({ C, s, route, width, active, onPreview, onEdit, onSave, on
 function GenBrowser({ C, s, routes, loading, onClose, onBack, onSave, onPreview, onEdit, onRegenerate, onFocus, onOpenPoi }: any) {
   const W = Dimensions.get('window').width, CARD = W - 36, GAP = 12;
   const [idx, setIdx] = useState(0);
+  const [sort, setSort] = useState('rel');
+  const view = useMemo(() => sortGen(routes, sort), [routes, sort]);
   const ref = useRef<ScrollView>(null);
-  useEffect(() => { if (routes[0]) onFocus(routes[0]); }, []);
-  const go = (i: number) => { if (i < 0 || i >= routes.length) return; setIdx(i); onFocus(routes[i]); try { ref.current?.scrollTo({ x: i * (CARD + GAP), animated: true }); } catch {} };
-  const onEnd = (e: any) => { const i = Math.round(e.nativeEvent.contentOffset.x / (CARD + GAP)); if (routes[i] && i !== idx) { setIdx(i); onFocus(routes[i]); } };
+  useEffect(() => { if (view[0]) onFocus(view[0]); }, []);
+  useEffect(() => { setIdx(0); if (view[0]) onFocus(view[0]); try { ref.current?.scrollTo({ x: 0, animated: false }); } catch {} }, [sort]);
+  const go = (i: number) => { if (i < 0 || i >= view.length) return; setIdx(i); onFocus(view[i]); try { ref.current?.scrollTo({ x: i * (CARD + GAP), animated: true }); } catch {} };
+  const onEnd = (e: any) => { const i = Math.round(e.nativeEvent.contentOffset.x / (CARD + GAP)); if (view[i] && i !== idx) { setIdx(i); onFocus(view[i]); } };
   return (
     <>
       <View style={s.genBrowTop}>
         <TouchableOpacity style={s.genBrowIcon} activeOpacity={0.8} onPress={onBack}><Ionicons name="chevron-back" size={22} color={C.txt} /></TouchableOpacity>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingHorizontal: 4, alignItems: 'center' }} style={{ flex: 1 }}>
-          {routes.map((r: any, i: number) => (
+          {view.map((r: any, i: number) => (
             <TouchableOpacity key={r.id} style={[s.genCatChip, i === idx && s.genCatChipOn]} activeOpacity={0.8} onPress={() => go(i)}>
               <Ionicons name={(r.themeIon || 'map') as any} size={14} color={i === idx ? C.bg : C.txt} /><Text style={[s.genCatTxt, i === idx && { color: C.bg }]} numberOfLines={1}>{(r.themeLabel || r.name).split(' ')[0]}</Text>
             </TouchableOpacity>
@@ -2588,12 +2602,18 @@ function GenBrowser({ C, s, routes, loading, onClose, onBack, onSave, onPreview,
       </View>
 
       <View style={s.genBrowBottom}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0, marginBottom: 8 }} contentContainerStyle={{ gap: 8, alignItems: 'center' }}>
+          <Ionicons name="swap-vertical-outline" size={14} color={C.dim} />
+          {GEN_SORTS.map((so) => { const on = sort === so.k; return (
+            <TouchableOpacity key={so.k} style={[s.sortChip, on && s.sortChipOn]} activeOpacity={0.8} onPress={() => setSort(so.k)}><Text style={[s.sortChipTxt, on && { color: C.bg }]}>{so.l}</Text></TouchableOpacity>
+          ); })}
+        </ScrollView>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-          <View style={s.countPill}><Text style={s.exploreCountTxt}>{idx + 1} z {routes.length}</Text></View>
+          <View style={s.countPill}><Text style={s.exploreCountTxt}>{idx + 1} z {view.length}</Text></View>
           {loading && <View style={[s.countPill, { flexDirection: 'row', gap: 6, alignItems: 'center' }]}><ActivityIndicator size="small" color={C.accent} /><Text style={s.exploreCountTxt}>dokładam…</Text></View>}
         </View>
         <ScrollView ref={ref} horizontal snapToInterval={CARD + GAP} decelerationRate="fast" showsHorizontalScrollIndicator={false} onMomentumScrollEnd={onEnd} contentContainerStyle={{ paddingHorizontal: 18, gap: GAP }}>
-          {routes.map((r: any, i: number) => <GenBrowCard key={r.id} C={C} s={s} route={r} width={CARD} active={i === idx} onPreview={() => onPreview(r)} onEdit={() => onEdit(r)} onSave={() => onSave(r)} onOpenPoi={onOpenPoi} />)}
+          {view.map((r: any, i: number) => <GenBrowCard key={r.id} C={C} s={s} route={r} width={CARD} active={i === idx} onPreview={() => onPreview(r)} onEdit={() => onEdit(r)} onSave={() => onSave(r)} onOpenPoi={onOpenPoi} />)}
         </ScrollView>
         <View style={s.genBrowFooter}>
           <TouchableOpacity style={[s.btnSecondary, { flex: 1 }]} activeOpacity={0.8} onPress={onRegenerate}><Text style={s.btnSecondaryTxt}>Generuj ponownie</Text></TouchableOpacity>
@@ -2709,7 +2729,7 @@ function GeneratorScreen({ C, s, step, area, radius, setRadius, cfg, setCfg, loa
           <Text style={s.groupLabel}>Długość ({cfg.activity === 'walk' ? 'spacer' : 'trasa'})</Text>
           <View style={s.genChipRow}>{[3, 5, 8, 12].map((l) => <Pill key={l} on={cfg.lengthKm === l} label={l + ' km'} onPress={() => up({ lengthKm: l })} />)}</View>
 
-          <RouteCharacter C={C} s={s} activity={cfg.activity} prefs={cfg.prefs || {}} onChange={(p: any) => up({ prefs: p })} showDifficulty />
+          <RouteCharacter C={C} s={s} activity={cfg.activity} prefs={cfg.prefs || {}} onChange={(p: any) => up({ prefs: p })} showDifficulty={false} />
 
           <Text style={s.groupLabel}>Kształt</Text>
           <View style={s.genChipRow}>{[['loop', 'Pętla (wróć do startu)'], ['oneway', 'W jedną stronę']].map(([k, l]) => <Pill key={k} on={cfg.shape === k} label={l} onPress={() => up({ shape: k })} />)}</View>
@@ -2879,6 +2899,9 @@ function makeStyles(C: C) {
     prefPct: { color: C.accent, fontSize: 13, fontWeight: '800', width: 42, textAlign: 'right' },
     infoChip: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 9, paddingVertical: 5, borderRadius: 999, backgroundColor: C.surface, borderWidth: 1, borderColor: C.stroke },
     infoChipTxt: { color: C.dim, fontSize: 11.5, fontWeight: '700' },
+    sortChip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999, backgroundColor: C.surface, borderWidth: 1, borderColor: C.stroke },
+    sortChipOn: { backgroundColor: C.txt, borderColor: C.txt },
+    sortChipTxt: { color: C.txt, fontSize: 12, fontWeight: '700' },
     whatifBanner: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#f5a62322', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 7, marginBottom: 10 },
     whatifTxt: { color: '#e0a000', fontSize: 12, fontWeight: '800', flex: 1 },
     genPanel: { flex: 1, backgroundColor: C.bg },
