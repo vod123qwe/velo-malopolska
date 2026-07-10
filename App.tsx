@@ -585,29 +585,28 @@ function whyFor(kind: string): string {
 }
 // POI-FIRST: trasa jest ŁĄCZNIKIEM między najciekawszymi miejscami. Kolejność po kącie = spójna pętla.
 // Rola typów: gastro = jeden przystanek; zabytki/natura/widoki = mijane po drodze.
-async function buildTour(area: any, cfg: any, activity: string, waypool: any[], foodpool: any[], opts: any): Promise<any> {
+async function buildTour(area: any, cfg: any, activity: string, waypool: any[], opts: any): Promise<any> {
   const start = [area.lat, area.lon];
   const perStop = activity === 'walk' ? 1.5 : 2.8; // km na przystanek
   let target = Math.max(2, Math.min(8, Math.round((cfg.lengthKm || 5) / perStop)));
   if (opts.more) target += 2; // wariant „co jeśli": dłużej, ale więcej atrakcji
   let picks = waypool.slice(0, Math.min(target, waypool.length));
-  let seq = picks.slice();
-  const food = foodpool && foodpool[0];
-  if (food) seq.push(food); // najwyżej jeden przystanek gastro (cel odpoczynku, nie łańcuch knajp)
-  seq.sort((a, b) => angleAround(start, a) - angleAround(start, b)); // dookoła środka
-  let wpts: number[][] = [start, ...seq.map((p) => [p.lat, p.lon])];
-  if (cfg.shape === 'loop') wpts.push(start);
+  let seq = picks.slice().sort((a: any, b: any) => angleAround(start, a) - angleAround(start, b)); // dookoła środka = pętla bez zygzaka
+  const food = opts.endFood || null; // knajpa NA SAM KONIEC (nie sortowana po kącie)
+  const buildW = (arr: any[]) => { const w: number[][] = [start, ...arr.map((p: any) => [p.lat, p.lon])]; if (food) w.push([food.lat, food.lon]); if (cfg.shape === 'loop') w.push(start); return w; };
+  let wpts = buildW(seq);
   let res = await routeThrough(wpts, opts.profile || prefProfile(activity, cfg.prefs));
   if (!res || !res.coords || res.coords.length < 2) {
     // ratunek: co drugi przystanek + łagodny profil (zwykle jeden nieosiągalny punkt psuł całość)
-    seq = seq.filter((_, i) => i % 2 === 0);
-    let w2: number[][] = [start, ...seq.map((p) => [p.lat, p.lon])]; if (cfg.shape === 'loop') w2.push(start);
-    const r2 = await routeThrough(w2, activity === 'walk' ? 'spacerowa' : 'rowerowa');
-    if (r2 && r2.coords && r2.coords.length >= 2) { res = r2; wpts = w2; }
+    seq = seq.filter((_: any, i: number) => i % 2 === 0);
+    wpts = buildW(seq);
+    const r2 = await routeThrough(wpts, activity === 'walk' ? 'spacerowa' : 'rowerowa');
+    if (r2 && r2.coords && r2.coords.length >= 2) res = r2;
   }
-  if (!res || !res.coords || res.coords.length < 2 || !seq.length) return null;
+  const full = food ? [...seq, food] : seq;
+  if (!res || !res.coords || res.coords.length < 2 || !full.length) return null;
   const km = res.distM / 1000;
-  const stops = seq.map((p) => ({ name: p.name, kind: p.kind, lat: p.lat, lon: p.lon, wikipedia: p.wikipedia || undefined, why: whyFor(p.kind), desc: '', ...(cfg.game ? { quiz: QUIZZES[p.name] || makeAutoQuiz(p) } : {}) }));
+  const stops = full.map((p: any) => ({ name: p.name, kind: p.kind, lat: p.lat, lon: p.lon, wikipedia: p.wikipedia || undefined, why: whyFor(p.kind), desc: '', ...(cfg.game ? { quiz: QUIZZES[p.name] || makeAutoQuiz(p) } : {}) }));
   const narr = stops.map((x) => x.name.replace(/ w .*/, '')).join(' → ');
   return {
     id: 'gen' + Date.now() + '_' + opts.idx, name: (cfg.game ? 'Gra: ' : '') + (opts.label || 'Wycieczka') + ' • ' + km.toFixed(1) + ' km',
@@ -648,6 +647,27 @@ async function buildLoopRoute(area: any, cfg: any, activity: string, idx: number
     themeKey: 'loop', themeLabel: 'Pętla', themeIon: 'repeat-outline', waypoints: wpts,
   };
 }
+// Knajpy w okolicy (Overpass) — Wikipedia nie ma gastronomii; do „mety w knajpie"
+async function fetchFoodNear(lat: number, lon: number, radius: number): Promise<any[]> {
+  const R = Math.min(4000, Math.max(1200, radius || 2500));
+  const latP = R / 111000, lonP = R / 71000;
+  const bbox = `${(lat - latP).toFixed(4)},${(lon - lonP).toFixed(4)},${(lat + latP).toFixed(4)},${(lon + lonP).toFixed(4)}`;
+  const q = `[out:json][timeout:25];(nwr["amenity"~"restaurant|cafe|fast_food"]["name"](${bbox}););out center tags 60;`;
+  const EPS = ['https://overpass-api.de/api/interpreter', 'https://overpass.private.coffee/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
+  for (const ep of EPS) {
+    try {
+      const r = await fetchT(ep, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'data=' + encodeURIComponent(q) }, 16000);
+      const d = await r.json();
+      if (d && Array.isArray(d.elements)) {
+        const out: any[] = [];
+        for (const e of d.elements) { const t = e.tags || {}; const la = e.lat ?? e.center?.lat, lo = e.lon ?? e.center?.lon; if (la == null || !t.name) continue; out.push({ name: t.name, kind: t.amenity === 'cafe' ? 'Kawiarnia' : 'Restauracja', lat: +la.toFixed(5), lon: +lo.toFixed(5), cuisine: t.cuisine || null, d: hav([lat, lon], [la, lo]) }); }
+        out.sort((a, b) => a.d - b.d);
+        return out.slice(0, 20);
+      }
+    } catch {}
+  }
+  return [];
+}
 // POI-FIRST: układa wycieczki WOKÓŁ najciekawszych miejsc (nie pętla z doklejonymi punktami).
 async function generateRoutes(area: any, cfg: any, activity: string, onPartial?: (rs: any[]) => void): Promise<any[]> {
   CURRENT_ACTIVITY = activity;
@@ -656,10 +676,12 @@ async function generateRoutes(area: any, cfg: any, activity: string, onPartial?:
   const themes: string[] = cfg.prefs?.themes || [];
   const want = new Set(themes.map((k) => THEME_TO_T[k]));
   const cand = pois.filter((p) => !want.size || want.has(p.theme));
-  // waypointy (zabytki/natura/atrakcje) rankowane wg CIEKAWOŚCI, potem bliskości; gastro osobno (jeden przystanek)
+  // waypointy (zabytki/natura/atrakcje) rankowane wg CIEKAWOŚCI, potem bliskości
   const waypool = cand.filter((p) => p.theme !== 'jedzenie').sort((a, b) => poiWeight(b.kind) - poiWeight(a.kind) || a.d - b.d);
-  const useFood = !want.size || want.has('jedzenie');
-  const foodpool = cand.filter((p) => p.theme === 'jedzenie').sort((a, b) => a.d - b.d);
+  // meta w knajpie (na sam koniec): konkretna wybrana LUB „dowolna" → najbliższa z Overpass
+  let endFood: any = null;
+  if (cfg.endFood && cfg.endFood !== 'auto') endFood = cfg.endFood;
+  else if (cfg.endFood === 'auto') { const f = await fetchFoodNear(area.lat, area.lon, area.radius); endFood = f[0] || null; }
   const order = (list: any[]) => { const m = list.filter((r) => !r.whatif).sort((a, b) => scoreRoute(b, cfg.prefs) - scoreRoute(a, cfg.prefs)); const w = list.filter((r) => r.whatif); return [...m, ...w]; };
   const acc: any[] = [];
   const push = (r: any) => { if (r) { acc.push(r); if (onPartial) onPartial(order(acc)); } };
@@ -668,12 +690,12 @@ async function generateRoutes(area: any, cfg: any, activity: string, onPartial?:
   const roads: string[] = (cfg.prefs?.roads && cfg.prefs.roads.length) ? cfg.prefs.roads : [activity === 'walk' ? 'trails' : 'cyclepath'];
   const modes = roadOpts.filter((o: any) => roads.includes(o.key));
   if (waypool.length) {
-    const jobs = modes.map((m: any, i: number) => buildTour(area, cfg, activity, waypool, useFood ? foodpool : [], { idx: i, label: m.label, ion: m.ion, profile: roadProfile(activity, m.key) }).then(push).catch(() => {}));
+    const jobs = modes.map((m: any, i: number) => buildTour(area, cfg, activity, waypool, { idx: i, label: m.label, ion: m.ion, profile: roadProfile(activity, m.key), endFood }).then(push).catch(() => {}));
     // gdy tylko jeden tryb → dodaj wariant z innym doborem punktów (różnorodność)
-    if (modes.length === 1 && waypool.length > 3) jobs.push(buildTour(area, cfg, activity, waypool.slice(1), useFood ? foodpool : [], { idx: 8, label: 'Inny wariant', ion: 'shuffle-outline', profile: roadProfile(activity, modes[0].key) }).then(push).catch(() => {}));
+    if (modes.length === 1 && waypool.length > 3) jobs.push(buildTour(area, cfg, activity, waypool.slice(1), { idx: 8, label: 'Inny wariant', ion: 'shuffle-outline', profile: roadProfile(activity, modes[0].key), endFood }).then(push).catch(() => {}));
     await Promise.all(jobs);
     // what-if: dłuższa, więcej atrakcji (na pierwszym trybie)
-    if (waypool.length > 4) await buildTour(area, cfg, activity, waypool, useFood ? foodpool : [], { idx: 9, label: 'Dłuższa, więcej atrakcji', ion: 'star-outline', more: true, whatif: true, profile: roadProfile(activity, modes[0].key) }).then(push).catch(() => {});
+    if (waypool.length > 4) await buildTour(area, cfg, activity, waypool, { idx: 9, label: 'Dłuższa, więcej atrakcji', ion: 'star-outline', more: true, whatif: true, profile: roadProfile(activity, modes[0].key), endFood }).then(push).catch(() => {});
   }
   // fallback: brak/za mało POI → okrężne pętle (nie wymagają punktów), żeby nigdy nie było pustki
   if (acc.length < 2) {
@@ -2691,6 +2713,10 @@ function RouteCharacter({ C, s, activity, prefs, onChange, showDifficulty }: any
 function GeneratorScreen({ C, s, step, area, radius, setRadius, cfg, setCfg, loading, results, onNext, onGenerate, onBack, onClose, onSave, onPreview, onEdit, onFocus, onOpenPoi }: any) {
   const up = (patch: any) => setCfg((c: any) => ({ ...c, ...patch }));
   const Pill = ({ on, label, onPress }: any) => (<TouchableOpacity style={[s.modePill, on && s.modePillOn]} activeOpacity={0.8} onPress={onPress}><Text style={[s.modePillTxt, on && s.modePillTxtOn]}>{label}</Text></TouchableOpacity>);
+  const [foodOpen, setFoodOpen] = useState(false);
+  const [foodList, setFoodList] = useState<any[]>([]);
+  const [foodLoading, setFoodLoading] = useState(false);
+  const loadFood = async () => { if (foodList.length || foodLoading || !area) return; setFoodLoading(true); try { const f = await fetchFoodNear(area.lat, area.lon, radius); setFoodList(f); } catch {} setFoodLoading(false); };
 
   if (step === 'area') {
     return (
@@ -2733,6 +2759,26 @@ function GeneratorScreen({ C, s, step, area, radius, setRadius, cfg, setCfg, loa
 
           <Text style={s.groupLabel}>Kształt</Text>
           <View style={s.genChipRow}>{[['loop', 'Pętla (wróć do startu)'], ['oneway', 'W jedną stronę']].map(([k, l]) => <Pill key={k} on={cfg.shape === k} label={l} onPress={() => up({ shape: k })} />)}</View>
+
+          <Text style={s.groupLabel}>Zakończ w knajpie <Text style={{ color: C.dim, fontWeight: '400' }}>(jedna, na koniec)</Text></Text>
+          <View style={s.genChipRow}>
+            <Pill on={!cfg.endFood} label="Nie" onPress={() => up({ endFood: null })} />
+            <Pill on={cfg.endFood === 'auto'} label="Dowolna" onPress={() => { up({ endFood: 'auto' }); loadFood(); }} />
+            <TouchableOpacity style={[s.modePill, { flexDirection: 'row', alignItems: 'center', gap: 5 }, cfg.endFood && cfg.endFood.name && s.modePillOn]} activeOpacity={0.8} onPress={() => { setFoodOpen((o) => !o); loadFood(); }}>
+              <Text style={[s.modePillTxt, cfg.endFood && cfg.endFood.name && s.modePillTxtOn]} numberOfLines={1}>{cfg.endFood && cfg.endFood.name ? cfg.endFood.name : 'Wybierz…'}</Text>
+              <Ionicons name={foodOpen ? 'chevron-up' : 'chevron-down'} size={14} color={cfg.endFood && cfg.endFood.name ? C.bg : C.dim} />
+            </TouchableOpacity>
+          </View>
+          {foodOpen && (
+            foodLoading ? <View style={{ paddingVertical: 12, alignItems: 'center' }}><ActivityIndicator color={C.dim} /></View>
+              : foodList.length ? (
+                <View style={[s.genChipRow, { marginTop: 8 }]}>{foodList.map((f: any, i: number) => { const on = cfg.endFood && cfg.endFood.name === f.name && cfg.endFood.lat === f.lat; return (
+                  <TouchableOpacity key={i} style={[s.genThemeChip, on && s.genThemeChipOn]} activeOpacity={0.8} onPress={() => { up({ endFood: { name: f.name, lat: f.lat, lon: f.lon, kind: f.kind } }); setFoodOpen(false); }}>
+                    <Ionicons name={f.kind === 'Kawiarnia' ? 'cafe-outline' : 'restaurant-outline'} size={14} color={on ? C.bg : C.txt} /><Text style={[s.genThemeTxt, on && { color: C.bg }]} numberOfLines={1}>{f.name}{f.cuisine ? ` · ${f.cuisine.split(';')[0]}` : ''}</Text>
+                  </TouchableOpacity>
+                ); })}</View>
+              ) : <Text style={[s.sub, { paddingVertical: 8, fontSize: 12 }]}>Nie znalazłem knajp w tym obszarze. Spróbuj większego promienia.</Text>
+          )}
 
           <Text style={s.groupLabel}>Dodatkowo</Text>
           <View style={s.settingRow}><Text style={s.settingTxt}>Tryb gry terenowej (quizy)</Text><Switch value={cfg.game} onValueChange={(v) => up({ game: v })} trackColor={{ true: C.accent, false: C.stroke }} /></View>
